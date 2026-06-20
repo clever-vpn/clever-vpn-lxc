@@ -3,10 +3,8 @@
 ## One-Click Install (Ubuntu 22.04+)
 
 ```bash
-bash -c "$(curl -L https://raw.githubusercontent.com/clever-vpn/clever-vpn-lxc/main/scripts/install.sh)" - -t <GITHUB_TOKEN>
+bash -c "$(curl -L https://raw.githubusercontent.com/clever-vpn/clever-vpn-lxc/main/scripts/install.sh)"
 ```
-
-Replace `<GITHUB_TOKEN>` with a GitHub [personal access token](https://github.com/settings/tokens) that has `repo` access.
 
 This will:
 1. Install Go
