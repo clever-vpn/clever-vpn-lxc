@@ -108,6 +108,9 @@ build_base_image() {
 
     log_info "Building base image from Debian 12 cloud..."
     
+    # Clean up any leftover builder from previous failed runs
+    lxc delete "$BASE_CONTAINER_NAME" --force 2>/dev/null || true
+    
     # 1. Launch temp container
     lxc launch images:debian/12/cloud "$BASE_CONTAINER_NAME" --network "$CONTAINER_NETWORK"
     log_info "Waiting for container to boot..."
