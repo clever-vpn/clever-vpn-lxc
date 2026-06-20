@@ -24,12 +24,20 @@ var plans = map[string]Plan{
 }
 
 type CreateReq struct {
-	Name    string `json:"name"`
-	Plan    string `json:"plan"`
-	Token   string `json:"token"`
-	Version string `json:"version"`
-	UserID  int    `json:"userId"`  // for port calculation
-	SSHKey  string `json:"sshKey"`  // public key for SSH access
+	Name     string `json:"name"`
+	Plan     string `json:"plan"`
+	Token    string `json:"token"`
+	Version  string `json:"version"`
+	UserID   int    `json:"userId"`
+	SSHKey   string `json:"sshKey,omitempty"`
+	Password string `json:"password,omitempty"` // optional, auto-generated if empty
+}
+
+type CreateResp struct {
+	Status   string   `json:"status"`
+	Name     string   `json:"name"`
+	Password string   `json:"password"`
+	Ports    PortInfo `json:"ports"`
 }
 
 type PortInfo struct {
@@ -115,6 +123,18 @@ func handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	lxdClient.StartContainer(req.Name)
 
+	// Generate password if not provided
+	password := req.Password
+	if password == "" {
+		out, err := exec.Command("openssl", "rand", "-base64", "12").Output()
+		if err == nil {
+			password = strings.TrimSpace(string(out))
+		}
+	}
+	// Set root password
+	pwCmd := fmt.Sprintf("echo 'root:%s' | chpasswd", password)
+	lxdClient.Exec(req.Name, []string{"bash", "-c", pwCmd}, nil, os.Stdout, os.Stderr)
+
 	// Inject SSH key if provided
 	if req.SSHKey != "" {
 		keyCmd := fmt.Sprintf("mkdir -p /root/.ssh && echo '%s' >> /root/.ssh/authorized_keys && chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys", req.SSHKey)
@@ -139,11 +159,20 @@ func handleCreate(w http.ResponseWriter, r *http.Request) {
 		addPortForward(ports.VPN, vip, 443)
 		log.Printf("Ports: ssh=%d, vpn=%d -> %s", ports.SSH, ports.VPN, vip)
 	}
+
+	// Async install VPN server
 	go func() {
 		cmd := fmt.Sprintf("curl -fsSL https://raw.githubusercontent.com/clever-vpn/clever-vpn-server/main/install.sh | bash -s -- '%s' '%s'", req.Version, req.Token)
 		lxdClient.Exec(req.Name, []string{"bash", "-c", cmd}, nil, os.Stdout, os.Stderr)
 	}()
-	jsonOK(w, map[string]string{"status": "creating", "name": req.Name})
+
+	ports := calcPorts(req.UserID)
+	jsonOK(w, CreateResp{
+		Status:   "creating",
+		Name:     req.Name,
+		Password: password,
+		Ports:    ports,
+	})
 }
 
 // GET /api/containers

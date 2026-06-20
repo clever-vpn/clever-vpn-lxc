@@ -124,8 +124,9 @@ build_base_image() {
         apt-get clean
         rm -rf /var/lib/apt/lists/*
         
-        # Configure SSH: disable password, allow key-only auth
-        sed -i "s/#PasswordAuthentication yes/PasswordAuthentication no/" /etc/ssh/sshd_config
+        # Configure SSH: allow both key and password auth
+        sed -i "s/#PermitRootLogin prohibit-password/PermitRootLogin yes/" /etc/ssh/sshd_config
+        sed -i "s/#PasswordAuthentication yes/PasswordAuthentication yes/" /etc/ssh/sshd_config
         systemctl enable ssh
     '
 
