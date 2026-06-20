@@ -1,38 +1,17 @@
 package lxc
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net"
-	"net/http"
+	"strings"
 	"time"
+
+	lxd "github.com/canonical/lxd/client"
+	"github.com/canonical/lxd/shared/api"
 )
 
-// Client wraps the LXD REST API.
 type Client struct {
-	http   *http.Client
-	baseURL string
+	server lxd.InstanceServer
 }
-
-// NewClient creates a new LXD API client.
-// socketPath is the path to the LXD Unix socket, e.g. /var/snap/lxd/common/lxd/unix.socket
-func NewClient(socketPath string) *Client {
-	return &Client{
-		http: &http.Client{
-			Transport: &http.Transport{
-				Dial: func(_, _ string) (net.Conn, error) {
-					return net.Dial("unix", socketPath)
-				},
-			},
-			Timeout: 30 * time.Second,
-		},
-		baseURL: "http://unix/1.0",
-	}
-}
-
-// ==================== Container ====================
 
 type Container struct {
 	Name   string `json:"name"`
@@ -43,162 +22,162 @@ type Container struct {
 	} `json:"state"`
 }
 
-type CreateInstanceReq struct {
-	Name      string            `json:"name"`
-	Source    InstanceSource    `json:"source"`
-	Config    map[string]string `json:"config"`
-	Devices   map[string]Device `json:"devices,omitempty"`
-	Type      string            `json:"type,omitempty"`
+func NewClient(socketPath string) (*Client, error) {
+	server, err := lxd.ConnectLXDUnix(socketPath, nil)
+	if err != nil {
+		return nil, fmt.Errorf("connect lxd unix socket %s: %w", socketPath, err)
+	}
+	return &Client{server: server}, nil
 }
 
-type InstanceSource struct {
-	Type  string `json:"type"`
-	Alias string `json:"alias"`
-}
-
-type Device struct {
-	Type    string `json:"type"`
-	NicType string `json:"nictype,omitempty"`
-	Parent  string `json:"parent,omitempty"`
-}
-
-type ExecReq struct {
-	Command   []string `json:"command"`
-	WaitForWS bool     `json:"wait-for-websocket"`
-	Interactive bool   `json:"interactive"`
-}
-
-type OperationResp struct {
-	Type       string `json:"type"`
-	Status     string `json:"status"`
-	StatusCode int    `json:"status_code"`
-	Metadata   struct {
-		ID string `json:"id"`
-	} `json:"metadata"`
-}
-
-type StateReq struct {
-	Action  string `json:"action"`
-	Timeout int    `json:"timeout"`
-}
-
-// ==================== API Methods ====================
-
-func (c *Client) CreateContainer(name, image, network string, cpu int, memMB int) error {
-	req := CreateInstanceReq{
+func (c *Client) CreateContainer(name, image, network string, cpu int, memMB int, config map[string]string) error {
+	post := api.InstancesPost{
 		Name: name,
-		Source: InstanceSource{
+		Type: "container",
+		InstancePut: api.InstancePut{
+			Config: config,
+			Devices: map[string]map[string]string{
+				"eth0": {
+					"type":    "nic",
+					"network": network,
+				},
+			},
+		},
+		Source: api.InstanceSource{
 			Type:  "image",
 			Alias: image,
 		},
-		Config: map[string]string{
-			"limits.cpu":    fmt.Sprintf("%d", cpu),
-			"limits.memory": fmt.Sprintf("%dMB", memMB),
-		},
 	}
-	return c.doJSON("POST", "/instances", req, nil)
+	if post.Config == nil {
+		post.Config = map[string]string{}
+	}
+	post.Config["limits.cpu"] = fmt.Sprintf("%d", cpu)
+	post.Config["limits.memory"] = fmt.Sprintf("%dMB", memMB)
+	// Enable nesting so eBPF programs can load in the container.
+	post.Config["security.nesting"] = "true"
+	// Allow eBPF programs to lock required memory.
+	post.Config["limits.kernel.memlock"] = "unlimited"
+	// BTF loading (BPF_BTF_GET_FD_BY_ID) requires CAP_SYS_ADMIN.
+	post.Config["security.privileged"] = "true"
+
+	op, err := c.server.CreateInstance(post)
+	if err != nil {
+		return err
+	}
+	return op.Wait()
 }
 
 func (c *Client) StartContainer(name string) error {
-	return c.doJSON("PUT", fmt.Sprintf("/instances/%s/state", name),
-		StateReq{Action: "start", Timeout: 30}, nil)
+	op, err := c.server.UpdateInstanceState(name, api.InstanceStatePut{
+		Action:  "start",
+		Timeout: 30,
+	}, "")
+	if err != nil {
+		return err
+	}
+	return op.Wait()
 }
 
 func (c *Client) StopContainer(name string) error {
-	return c.doJSON("PUT", fmt.Sprintf("/instances/%s/state", name),
-		StateReq{Action: "stop", Timeout: 30}, nil)
+	op, err := c.server.UpdateInstanceState(name, api.InstanceStatePut{
+		Action:  "stop",
+		Timeout: 30,
+		Force:   true,
+	}, "")
+	if err != nil {
+		return err
+	}
+	return op.Wait()
 }
 
 func (c *Client) DeleteContainer(name string) error {
-	return c.do("DELETE", fmt.Sprintf("/instances/%s", name), nil)
+	op, err := c.server.DeleteInstance(name, true)
+	if err != nil {
+		return err
+	}
+	return op.Wait()
 }
 
 func (c *Client) GetContainer(name string) (*Container, error) {
-	var resp struct {
-		Metadata Container `json:"metadata"`
-	}
-	if err := c.doJSON("GET", fmt.Sprintf("/instances/%s", name), nil, &resp); err != nil {
+	inst, _, err := c.server.GetInstance(name)
+	if err != nil {
 		return nil, err
 	}
-	return &resp.Metadata, nil
+	state, _, err := c.server.GetInstanceState(name)
+	if err != nil {
+		return nil, err
+	}
+	return toContainer(inst, state), nil
 }
 
 func (c *Client) ListContainers(prefix string) ([]Container, error) {
-	var resp struct {
-		Metadata []Container `json:"metadata"`
-	}
-	url := "/instances"
-	if prefix != "" {
-		url += "?recursion=1"
-	}
-	if err := c.doJSON("GET", url, nil, &resp); err != nil {
+	insts, err := c.server.GetInstances(lxd.GetInstancesArgs{
+		InstanceType: api.InstanceTypeContainer,
+	})
+	if err != nil {
 		return nil, err
 	}
-	if prefix == "" {
-		return resp.Metadata, nil
-	}
-	var filtered []Container
-	for _, c := range resp.Metadata {
-		if len(c.Name) >= len(prefix) && c.Name[:len(prefix)] == prefix {
-			filtered = append(filtered, c)
+
+	containers := make([]Container, 0, len(insts))
+	for _, inst := range insts {
+		if prefix != "" && !strings.HasPrefix(inst.Name, prefix) {
+			continue
 		}
+		container := Container{
+			Name:   inst.Name,
+			Status: inst.Status,
+		}
+		containers = append(containers, container)
 	}
-	return filtered, nil
+	return containers, nil
 }
 
 func (c *Client) ResizeContainer(name string, cpu int, memMB int) error {
-	req := map[string]string{
-		"config": fmt.Sprintf("{\"limits.cpu\":\"%d\",\"limits.memory\":\"%dMB\"}", cpu, memMB),
-	}
-	return c.doJSON("PATCH", fmt.Sprintf("/instances/%s", name), req, nil)
-}
-
-func (c *Client) Exec(name string, cmd []string, stdin io.Reader, stdout, stderr io.Writer) error {
-	req := ExecReq{
-		Command:   cmd,
-		WaitForWS: true,
-	}
-	var resp OperationResp
-	if err := c.doJSON("POST", fmt.Sprintf("/instances/%s/exec", name), req, &resp); err != nil {
+	inst, etag, err := c.server.GetInstance(name)
+	if err != nil {
 		return err
 	}
-	// Simplified: real implementation would use WebSocket
-	return nil
+
+	put := inst.Writable()
+	if put.Config == nil {
+		put.Config = map[string]string{}
+	}
+	put.Config["limits.cpu"] = fmt.Sprintf("%d", cpu)
+	put.Config["limits.memory"] = fmt.Sprintf("%dMB", memMB)
+
+	op, err := c.server.UpdateInstance(name, put, etag)
+	if err != nil {
+		return err
+	}
+	return op.Wait()
 }
 
-// ==================== HTTP Helpers ====================
-
-func (c *Client) doJSON(method, path string, body, result interface{}) error {
-	var r io.Reader
-	if body != nil {
-		b, err := json.Marshal(body)
-		if err != nil {
-			return fmt.Errorf("marshal: %w", err)
+func (c *Client) InstanceIPv4(name string, timeout time.Duration) (string, error) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		state, _, err := c.server.GetInstanceState(name)
+		if err == nil {
+			for _, network := range state.Network {
+				for _, addr := range network.Addresses {
+					if addr.Family == "inet" && addr.Scope == "global" && addr.Address != "" {
+						return addr.Address, nil
+					}
+				}
+			}
 		}
-		r = bytes.NewReader(b)
+		time.Sleep(time.Second)
 	}
-	req, err := http.NewRequest(method, c.baseURL+path, r)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return fmt.Errorf("request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("LXD API error %d: %s", resp.StatusCode, string(b))
-	}
-	if result != nil {
-		return json.NewDecoder(resp.Body).Decode(result)
-	}
-	return nil
+	return "", fmt.Errorf("timed out waiting for IPv4 for %s", name)
 }
 
-func (c *Client) do(method, path string, result interface{}) error {
-	return c.doJSON(method, path, nil, result)
+func toContainer(inst *api.Instance, state *api.InstanceState) *Container {
+	container := &Container{
+		Name:   inst.Name,
+		Status: inst.Status,
+	}
+	if state != nil {
+		container.State.Memory = state.Memory.Usage
+		container.State.CPU = state.CPU.Usage
+	}
+	return container
 }

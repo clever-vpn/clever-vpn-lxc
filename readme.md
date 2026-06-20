@@ -27,12 +27,46 @@ This will:
 
 ```json
 {
-  "name": "user-101",
   "plan": "basic",
-  "version": "v2.1.0",
+  "userId": 101,
+  "password": "optional-initial-password",
+  "sshKey": "ssh-ed25519 AAAA... user@example",
+  "installScriptUrl": "https://raw.githubusercontent.com/clever-vpn/clever-vpn-server/main/install.sh",
+  "version": "v2.1.4",
   "token": "eyJ..."
 }
 ```
+
+```json
+{
+  "status": "creating",
+  "name": "user-a1b2c3d4-...",
+  "password": "generated-or-requested-password",
+  "ports": {
+    "ssh": 20101,
+    "vpn": 10101
+  }
+}
+```
+
+## Provisioning Model
+
+`clever-vpn-base` is the reusable base image. It should contain only shared packages and common runtime dependencies.
+
+Per-user values are injected at instance creation time through `cloud-init`, including:
+1. Root password
+2. User SSH public key
+3. Install script URL
+4. Application version and token
+5. Instance metadata written to `/etc/clever-vpn/bootstrap.env`
+
+During first boot, the controller runs the install script from cloud-init. For the Clever VPN server installer, that is the automation-friendly equivalent of:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/clever-vpn/clever-vpn-server/main/install.sh | bash -s -- v2.1.4 <token>
+```
+
+This is equivalent to the common interactive form based on `bash -c "$(curl -L ...)" @ <version> <token>`, but is easier to quote safely inside automation.
 
 ## Environment Variables
 
@@ -43,6 +77,7 @@ This will:
 | `LXC_NETWORK` | `vpnbr0` | Container network bridge |
 | `LXC_NAME_PREFIX` | `user-` | Container name prefix |
 | `PORT` | `8080` | HTTP listen port |
+| `VPN_INSTALL_SCRIPT_URL` | `https://raw.githubusercontent.com/clever-vpn/clever-vpn-server/main/install.sh` | Default install script URL when `installScriptUrl` is omitted |
 
 ## Container Plans
 
@@ -58,19 +93,52 @@ This will:
 ┌─ Host (Ubuntu 22.04+) ──────────────────────────────────┐
 │                                                           │
 │  clever-vpn-lxc (Go, :8080)                              │
-│  ├─ POST /api/containers  →  LXD REST API                │
-│  ├─ GET  /api/containers  →  container list              │
+│  ├─ POST /api/containers  →  official LXD client + cloud-init │
+│  ├─ GET  /api/containers  →  official LXD client         │
 │  └─ ...                                                  │
 │                                                           │
-│  LXD (REST API via Unix socket)                          │
+│  LXD (API via Unix socket)                               │
 │  ├─ clever-vpn-base (image)                              │
 │  ├─ user-101: 10.0.1.10                                  │
 │  ├─ user-102: 10.0.1.11                                  │
 │  └─ ...                                                  │
 │                                                           │
+│  cloud-init: password/key/install metadata               │
 │  iptables DNAT: 公网:ext → user-{id}:{port}              │
 └───────────────────────────────────────────────────────────┘
 ```
+
+## Host Requirements
+
+The host must be configured for LXC containers to run eBPF programs and WireGuard:
+
+| Requirement | Config | Auto-set by |
+|-------------|--------|-------------|
+| WireGuard kernel module | `/etc/modules-load.d/clever-vpn.conf` | `setup-lxc-host.sh` |
+| Unprivileged BPF | `kernel.unprivileged_bpf_disabled=0` in `/etc/sysctl.d/99-bpf.conf` | `setup-lxc-host.sh` |
+
+### Container Security Settings
+
+Every container is created with these configs automatically:
+
+| Config | Purpose |
+|--------|---------|
+| `security.nesting=true` | Allow eBPF syscalls in the container |
+| `security.privileged=true` | Required for BTF loading (`BPF_BTF_GET_FD_BY_ID` needs `CAP_SYS_ADMIN`) |
+| `limits.kernel.memlock=unlimited` | Allow eBPF programs to lock required memory |
+
+Without these, `clever-vpn-server` will fail with memlock / BTF errors.
+
+## Port Pools
+
+Two non-overlapping port pools are used for NAT forwarding:
+
+| Pool | Range | Protocol | Reason |
+|------|-------|----------|--------|
+| SSH | `22000-22999` | TCP only | TCP is not restricted; 22xxx is intuitive |
+| Service | `50000-54999` | TCP+UDP | >30000 avoids UDP blocking on some ISPs |
+
+Ports are allocated from pools at container creation, persisted to `/var/lib/clever-vpn-lxc/instances.json`, and remain bound to the container until deletion.
 
 ## LXC 基本管理命令
 
@@ -121,6 +189,8 @@ lxc info <name>                             # 查看快照列表
 VIP=$(lxc info <name> | awk '/eth0.*inet /{print $3}')
 iptables -t nat -A PREROUTING -p tcp --dport 10001 -j DNAT --to $VIP:443
 iptables -t nat -A PREROUTING -p udp --dport 10001 -j DNAT --to $VIP:443
+iptables -t nat -A OUTPUT -p tcp --dport 10001 -j DNAT --to $VIP:443
+iptables -t nat -A OUTPUT -p udp --dport 10001 -j DNAT --to $VIP:443
 iptables-save > /etc/iptables/rules.v4
 ```
 

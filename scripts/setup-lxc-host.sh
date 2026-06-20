@@ -84,16 +84,64 @@ BASE_CONTAINER_NAME="${BASE_CONTAINER_NAME:-vpn-base-builder}"
 
 # ==================== 网络配置 ====================
 setup_network() {
-    # Try to create; if already exists, just ensure config
-    if lxc network create "$CONTAINER_NETWORK" \
+    if lxc network show "$CONTAINER_NETWORK" &>/dev/null; then
+        log_info "Network '$CONTAINER_NETWORK' already exists"
+        # Ensure DNS is configured on existing network.
+        # LXD 6.x does not support dns.nameservers directly; use raw.dnsmasq instead.
+        if ! lxc network show "$CONTAINER_NETWORK" | grep -q 'raw.dnsmasq'; then
+            lxc network set "$CONTAINER_NETWORK" raw.dnsmasq 'server=8.8.8.8'
+        fi
+        return 0
+    fi
+
+    log_info "Creating container network '$CONTAINER_NETWORK' ($CONTAINER_SUBNET)..."
+    lxc network create "$CONTAINER_NETWORK" \
         ipv4.address="$CONTAINER_SUBNET" \
         ipv4.nat=true \
-        dns.nameservers=8.8.8.8 2>/dev/null; then
-        log_info "Network '$CONTAINER_NETWORK' created"
-    else
-        log_info "Network '$CONTAINER_NETWORK' already exists, ensuring DNS..."
-        lxc network set "$CONTAINER_NETWORK" dns.nameservers 8.8.8.8 2>/dev/null || true
+        raw.dnsmasq='server=8.8.8.8'
+    log_info "Network created"
+}
+
+# ==================== 内核配置 ====================
+setup_kernel_config() {
+    log_info "Configuring kernel for eBPF support..."
+
+    # WireGuard kernel module
+    modprobe wireguard 2>/dev/null || true
+    local modules_file="/etc/modules-load.d/clever-vpn.conf"
+    if [[ ! -f "$modules_file" ]]; then
+        echo "wireguard" > "$modules_file"
+        log_info "WireGuard module auto-load enabled: $modules_file"
     fi
+
+    # Allow unprivileged BPF (needed for LXC containers to load eBPF programs)
+    local bpf_conf="/etc/sysctl.d/99-bpf.conf"
+    if [[ ! -f "$bpf_conf" ]]; then
+        echo "kernel.unprivileged_bpf_disabled=0" > "$bpf_conf"
+        sysctl -w kernel.unprivileged_bpf_disabled=0
+        log_info "Unprivileged BPF enabled: $bpf_conf"
+    fi
+}
+
+# ==================== UFW 配置 ====================
+setup_ufw() {
+    if ! command -v ufw &>/dev/null; then
+        return 0
+    fi
+    if ! ufw status 2>/dev/null | grep -q 'Status: active'; then
+        return 0
+    fi
+
+    # LXD containers need DHCP/DNS from the bridge; UFW must allow traffic on bridge interfaces.
+    # See: https://canonical.com/lxd/docs/latest/howto/network_bridge_firewalld/
+    for br in "$CONTAINER_NETWORK" lxdbr0; do
+        if lxc network show "$br" &>/dev/null; then
+            ufw allow in on "$br" 2>/dev/null || true
+            ufw route allow in on "$br" 2>/dev/null || true
+            ufw route allow out on "$br" 2>/dev/null || true
+        fi
+    done
+    log_info "UFW rules added for LXD bridges"
 }
 
 # ==================== 基础镜像构建 ====================
@@ -103,15 +151,28 @@ build_base_image() {
         return 0
     fi
 
-    log_info "Building base image from Debian 12 cloud..."
-    
+    # Use the cloud-enabled image so per-instance credentials and install parameters can be
+    # injected at first boot via LXD cloud-init configuration.
+    local IMAGE_SRC="${LXC_IMAGE_SRC:-images:debian/12/cloud}"
+    log_info "Building base image from $IMAGE_SRC ..."
+
     # Clean up any leftover builder from previous failed runs
     lxc delete "$BASE_CONTAINER_NAME" --force 2>/dev/null || true
-    
+
     # 1. Launch temp container
-    lxc launch images:debian/12/cloud "$BASE_CONTAINER_NAME" --network "$CONTAINER_NETWORK"
+    lxc launch "$IMAGE_SRC" "$BASE_CONTAINER_NAME" --network "$CONTAINER_NETWORK"
     log_info "Waiting for container to boot..."
     sleep 5
+    lxc exec "$BASE_CONTAINER_NAME" -- cloud-init status --wait >/dev/null 2>&1 || true
+
+    # Verify network connectivity
+    if ! lxc exec "$BASE_CONTAINER_NAME" -- ping -c 1 -W 10 8.8.8.8 &>/dev/null; then
+        log_error "Container cannot reach the internet. Check UFW/firewall rules."
+        log_error "Try: ufw allow in on $CONTAINER_NETWORK && ufw route allow in on $CONTAINER_NETWORK"
+        lxc delete "$BASE_CONTAINER_NAME" --force 2>/dev/null || true
+        return 1
+    fi
+    log_info "Network connectivity verified"
 
     # 2. Install dependencies
     log_info "Installing VPN server dependencies..."
@@ -119,6 +180,7 @@ build_base_image() {
         export DEBIAN_FRONTEND=noninteractive
         apt-get update
         apt-get install -y --no-install-recommends \
+            cloud-init \
             wireguard-tools \
             nftables \
             curl \
@@ -126,10 +188,10 @@ build_base_image() {
             openssh-server
         apt-get clean
         rm -rf /var/lib/apt/lists/*
-        
+
         # Configure SSH: allow both key and password auth
-        sed -i "s/#PermitRootLogin prohibit-password/PermitRootLogin yes/" /etc/ssh/sshd_config
-        sed -i "s/#PasswordAuthentication yes/PasswordAuthentication yes/" /etc/ssh/sshd_config
+        sed -ri "s/^#?PermitRootLogin.*/PermitRootLogin yes/" /etc/ssh/sshd_config
+        sed -ri "s/^#?PasswordAuthentication.*/PasswordAuthentication yes/" /etc/ssh/sshd_config
         systemctl enable ssh
     '
 
@@ -144,7 +206,7 @@ build_base_image() {
     lxc stop "$BASE_CONTAINER_NAME"
     lxc publish "$BASE_CONTAINER_NAME" --alias "$BASE_IMAGE_ALIAS"
     lxc delete "$BASE_CONTAINER_NAME"
-    
+
     log_info "Base image '$BASE_IMAGE_ALIAS' created successfully!"
 }
 
@@ -163,7 +225,7 @@ setup_iptables_persist() {
 
 # ==================== Go API 服务部署 ====================
 install_go_api() {
-    local service_file="/opt/clever-vpn-lxc/clever-vpn-lxc.service"
+    local service_file="/etc/systemd/system/clever-vpn-lxc.service"
     if systemctl is-active --quiet clever-vpn-lxc 2>/dev/null; then
         log_info "Go API service already running"
         return 0
@@ -172,7 +234,7 @@ install_go_api() {
     log_info "Installing Go API service..."
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     
-    # Copy service file from repo
+    # Copy service file from repo to systemd
     if [[ -f "$SCRIPT_DIR/clever-vpn-lxc.service" ]]; then
         cp "$SCRIPT_DIR/clever-vpn-lxc.service" "$service_file"
     else
@@ -206,6 +268,8 @@ main() {
     install_lxd
     init_lxd
     setup_network
+    setup_ufw
+    setup_kernel_config
     build_base_image
     setup_iptables_persist
     install_go_api
