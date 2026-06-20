@@ -152,6 +152,32 @@ setup_iptables_persist() {
     apt-get install -y iptables-persistent
 }
 
+# ==================== Go API 服务部署 ====================
+install_go_api() {
+    local service_file="/opt/clever-vpn-lxc/clever-vpn-lxc.service"
+    if systemctl is-active --quiet clever-vpn-lxc 2>/dev/null; then
+        log_info "Go API service already running"
+        return 0
+    fi
+
+    log_info "Installing Go API service..."
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    
+    # Copy service file from repo
+    if [[ -f "$SCRIPT_DIR/clever-vpn-lxc.service" ]]; then
+        cp "$SCRIPT_DIR/clever-vpn-lxc.service" "$service_file"
+    else
+        log_error "Service file not found at $SCRIPT_DIR/clever-vpn-lxc.service"
+        return 1
+    fi
+
+    # Enable and start
+    systemctl daemon-reload
+    systemctl enable clever-vpn-lxc
+    systemctl start clever-vpn-lxc
+    log_info "Go API service started on :8080"
+}
+
 # ==================== 主流程 ====================
 main() {
     echo ""
@@ -173,6 +199,7 @@ main() {
     setup_network
     build_base_image
     setup_iptables_persist
+    install_go_api
 
     echo ""
     echo "============================================"
