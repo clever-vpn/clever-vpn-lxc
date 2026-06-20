@@ -87,7 +87,7 @@ setup_network() {
     if lxc network list 2>/dev/null | grep -q "$CONTAINER_NETWORK"; then
         log_info "Network '$CONTAINER_NETWORK' already exists"
         # Ensure DNS is configured on existing network
-        lxc network set "$CONTAINER_NETWORK" dns.mode dynamic 2>/dev/null || true
+        lxc network set "$CONTAINER_NETWORK" dns.nameservers 8.8.8.8 2>/dev/null || true
         return 0
     fi
 
@@ -95,7 +95,7 @@ setup_network() {
     lxc network create "$CONTAINER_NETWORK" \
         ipv4.address="$CONTAINER_SUBNET" \
         ipv4.nat=true \
-        dns.mode=dynamic
+        dns.nameservers=8.8.8.8
     log_info "Network created"
 }
 
