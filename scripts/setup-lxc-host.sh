@@ -119,9 +119,15 @@ build_base_image() {
             wireguard-tools \
             nftables \
             curl \
-            ca-certificates
+            ca-certificates \
+            openssh-server
         apt-get clean
         rm -rf /var/lib/apt/lists/*
+        
+        # Allow root SSH login with password (for initial setup)
+        sed -i "s/#PermitRootLogin prohibit-password/PermitRootLogin yes/" /etc/ssh/sshd_config
+        echo "root:$(openssl rand -base64 12)" | chpasswd
+        systemctl enable ssh
     '
 
     # 3. Enable IP forwarding permanently

@@ -6,6 +6,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
+	"strconv"
 	"strings"
 
 	"github.com/clever-vpn/clever-vpn-lxc/lxc"
@@ -26,6 +28,36 @@ type CreateReq struct {
 	Plan    string `json:"plan"`
 	Token   string `json:"token"`
 	Version string `json:"version"`
+	UserID  int    `json:"userId"` // used for port calculation
+}
+
+type PortInfo struct {
+	SSH int `json:"ssh"`
+	VPN int `json:"vpn"`
+}
+
+// calcPorts calculates the external ports for a given user ID.
+// SSH port = 20000 + id, VPN port = 10000 + id
+func calcPorts(userID int) PortInfo {
+	return PortInfo{
+		SSH: 20000 + userID,
+		VPN: 10000 + userID,
+	}
+}
+
+// addPortForward adds iptables DNAT rules for a container.
+func addPortForward(extPort int, containerIP string, intPort int) error {
+	for _, proto := range []string{"tcp", "udp"} {
+		cmd := exec.Command("iptables",
+			"-t", "nat", "-A", "PREROUTING",
+			"-p", proto, "--dport", strconv.Itoa(extPort),
+			"-j", "DNAT", "--to", fmt.Sprintf("%s:%d", containerIP, intPort),
+		)
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("iptables %s:%d: %w", proto, extPort, err)
+		}
+	}
+	return nil
 }
 
 type ResizeReq struct{ Plan string `json:"plan"` }
@@ -81,6 +113,24 @@ func handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	lxdClient.StartContainer(req.Name)
+
+	// Get container IP and set up port forwarding
+	infoCmd := exec.Command("lxc", "info", req.Name)
+	infoOut, _ := infoCmd.Output()
+	var vip string
+	for _, line := range strings.Split(string(infoOut), "\n") {
+		if strings.Contains(line, "inet") && strings.Contains(line, "eth0") {
+			vip = strings.Fields(line)[2]
+			break
+		}
+	}
+
+	if req.UserID > 0 && vip != "" {
+		ports := calcPorts(req.UserID)
+		addPortForward(ports.SSH, vip, 22)
+		addPortForward(ports.VPN, vip, 443)
+		log.Printf("Ports: ssh=%d, vpn=%d -> %s", ports.SSH, ports.VPN, vip)
+	}
 	go func() {
 		cmd := fmt.Sprintf("curl -fsSL https://raw.githubusercontent.com/clever-vpn/clever-vpn-server/main/install.sh | bash -s -- '%s' '%s'", req.Version, req.Token)
 		lxdClient.Exec(req.Name, []string{"bash", "-c", cmd}, nil, os.Stdout, os.Stderr)
