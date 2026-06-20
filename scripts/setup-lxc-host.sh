@@ -84,19 +84,16 @@ BASE_CONTAINER_NAME="${BASE_CONTAINER_NAME:-vpn-base-builder}"
 
 # ==================== 网络配置 ====================
 setup_network() {
-    if lxc network list 2>/dev/null | grep -q "$CONTAINER_NETWORK"; then
-        log_info "Network '$CONTAINER_NETWORK' already exists"
-        # Ensure DNS is configured on existing network
-        lxc network set "$CONTAINER_NETWORK" dns.nameservers 8.8.8.8 2>/dev/null || true
-        return 0
-    fi
-
-    log_info "Creating container network '$CONTAINER_NETWORK' ($CONTAINER_SUBNET)..."
-    lxc network create "$CONTAINER_NETWORK" \
+    # Try to create; if already exists, just ensure config
+    if lxc network create "$CONTAINER_NETWORK" \
         ipv4.address="$CONTAINER_SUBNET" \
         ipv4.nat=true \
-        dns.nameservers=8.8.8.8
-    log_info "Network created"
+        dns.nameservers=8.8.8.8 2>/dev/null; then
+        log_info "Network '$CONTAINER_NETWORK' created"
+    else
+        log_info "Network '$CONTAINER_NETWORK' already exists, ensuring DNS..."
+        lxc network set "$CONTAINER_NETWORK" dns.nameservers 8.8.8.8 2>/dev/null || true
+    fi
 }
 
 # ==================== 基础镜像构建 ====================
