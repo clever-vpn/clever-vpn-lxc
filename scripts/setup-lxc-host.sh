@@ -86,13 +86,16 @@ BASE_CONTAINER_NAME="${BASE_CONTAINER_NAME:-vpn-base-builder}"
 setup_network() {
     if lxc network list 2>/dev/null | grep -q "$CONTAINER_NETWORK"; then
         log_info "Network '$CONTAINER_NETWORK' already exists"
+        # Ensure DNS is configured on existing network
+        lxc network set "$CONTAINER_NETWORK" dns.mode dynamic 2>/dev/null || true
         return 0
     fi
 
     log_info "Creating container network '$CONTAINER_NETWORK' ($CONTAINER_SUBNET)..."
     lxc network create "$CONTAINER_NETWORK" \
         ipv4.address="$CONTAINER_SUBNET" \
-        ipv4.nat=true
+        ipv4.nat=true \
+        dns.mode=dynamic
     log_info "Network created"
 }
 
