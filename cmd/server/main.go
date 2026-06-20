@@ -28,7 +28,8 @@ type CreateReq struct {
 	Plan    string `json:"plan"`
 	Token   string `json:"token"`
 	Version string `json:"version"`
-	UserID  int    `json:"userId"` // used for port calculation
+	UserID  int    `json:"userId"`  // for port calculation
+	SSHKey  string `json:"sshKey"`  // public key for SSH access
 }
 
 type PortInfo struct {
@@ -113,6 +114,13 @@ func handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	lxdClient.StartContainer(req.Name)
+
+	// Inject SSH key if provided
+	if req.SSHKey != "" {
+		keyCmd := fmt.Sprintf("mkdir -p /root/.ssh && echo '%s' >> /root/.ssh/authorized_keys && chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys", req.SSHKey)
+		lxdClient.Exec(req.Name, []string{"bash", "-c", keyCmd}, nil, os.Stdout, os.Stderr)
+		log.Printf("SSH key injected for %s", req.Name)
+	}
 
 	// Get container IP and set up port forwarding
 	infoCmd := exec.Command("lxc", "info", req.Name)
