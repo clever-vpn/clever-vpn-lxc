@@ -1,34 +1,18 @@
 # Clever VPN - LXC Controller
 
-## Quick Start
+## One-Click Install (Ubuntu 22.04+)
 
 ```bash
-# 1. One-time: Setup LXD host (Ubuntu 22.04+)
-sudo bash scripts/setup-lxc-host.sh
-
-# 2. Start the Go controller
-go run ./cmd/server &
-# or: LXD_SOCKET=/path/to/socket PORT=8080 go run ./cmd/server
-
-# 3. Create a VPN container via API
-curl -X POST http://localhost:8080/api/containers \
-  -H "Content-Type: application/json" \
-  -d '{"name":"user-101","plan":"basic","version":"v2.1.0","token":"eyJ..."}'
-
-# 4. List containers
-curl http://localhost:8080/api/containers
-
-# 5. Check specific container
-curl http://localhost:8080/api/containers/user-101
-
-# 6. Resize container
-curl -X PUT http://localhost:8080/api/containers/user-101/resize \
-  -H "Content-Type: application/json" \
-  -d '{"plan":"pro"}'
-
-# 7. Delete container
-curl -X DELETE http://localhost:8080/api/containers/user-101
+bash -c "$(curl -L https://raw.githubusercontent.com/clever-vpn/clever-vpn-lxc/main/scripts/install.sh)" - -t <GITHUB_TOKEN>
 ```
+
+Replace `<GITHUB_TOKEN>` with a GitHub [personal access token](https://github.com/settings/tokens) that has `repo` access.
+
+This will:
+1. Install Go
+2. Clone this private repo
+3. Build the Go API
+4. Install LXD, create base image, start systemd service
 
 ## API Reference
 
