@@ -1,6 +1,5 @@
-# Binary
-clever-vpn-lxc
-lxc-manager
+# Binary (root level only)
+/lxc-manager
 
 # TLS keys and certs
 *.key
