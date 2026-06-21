@@ -86,7 +86,7 @@ jobs:
           R2_SECRET_ACCESS_KEY: ${{ env.R2_SECRET_ACCESS_KEY }}
         run: |
           terraform -chdir=deploy/terraform init \
-            -backend-config="endpoint=https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
+            -backend-config="endpoints={s3=\"https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com\"}" \
             -backend-config="bucket=clever-vpn-lxc-tfstate" \
             -backend-config="key=prod/terraform.tfstate" \
             -backend-config="region=auto" \
