@@ -52,6 +52,35 @@ jobs:
         with:
           terraform_wrapper: false
 
+      - name: Resolve lxc-manager version
+        if: inputs.action == 'deploy'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          INPUT_VERSION="$LXC_MANAGER_VERSION"
+
+          if [[ "${INPUT_VERSION}" == "latest" || -z "${INPUT_VERSION}" ]]; then
+            echo "Resolving latest release..."
+            RESOLVED=$(gh release list --repo clever-vpn/clever-vpn-lxc --limit 1 --json tagName --jq '.[0].tagName')
+            if [[ -z "${RESOLVED}" ]]; then
+              echo "ERROR: No releases found. Run the Release workflow first." >&2
+              exit 1
+            fi
+            echo "Latest release: ${RESOLVED}"
+          else
+            echo "Verifying release ${INPUT_VERSION}..."
+            if ! gh release view "${INPUT_VERSION}" --repo clever-vpn/clever-vpn-lxc &>/dev/null; then
+              echo "ERROR: Release ${INPUT_VERSION} does not exist." >&2
+              echo "Available releases:" >&2
+              gh release list --repo clever-vpn/clever-vpn-lxc --limit 10 >&2
+              exit 1
+            fi
+            RESOLVED="${INPUT_VERSION}"
+            echo "Release ${RESOLVED} verified."
+          fi
+
+          echo "LXC_MANAGER_VERSION=${RESOLVED}" >> "${GITHUB_ENV}"
+
       - name: Terraform Init
         env:
           TF_BACKEND_R2_ACCOUNT_ID: ${{ env.R2_ACCOUNT_ID }}
@@ -68,7 +97,7 @@ jobs:
           terraform -chdir=deploy/terraform plan \
             -var "vultr_api_key=$VULTR_API_KEY" \
             -var "cloudflare_api_token=$CF_API_TOKEN" \
-            -var "lxc_manager_version=${{ inputs.lxc_manager_version }}" \
+            -var "lxc_manager_version=$LXC_MANAGER_VERSION" \
             -var "ssh_public_key=$LXC_SSH_PUBLIC_KEY" \
             -var "admin_password_hash=$LXC_ADMIN_PASSWORD_HASH" \
             -var "r2_account_id=$R2_ACCOUNT_ID" \
@@ -87,7 +116,7 @@ jobs:
           terraform -chdir=deploy/terraform destroy \
             -var "vultr_api_key=$VULTR_API_KEY" \
             -var "cloudflare_api_token=$CF_API_TOKEN" \
-            -var "lxc_manager_version=${{ inputs.lxc_manager_version }}" \
+            -var "lxc_manager_version=$LXC_MANAGER_VERSION" \
             -var "ssh_public_key=$LXC_SSH_PUBLIC_KEY" \
             -var "admin_password_hash=$LXC_ADMIN_PASSWORD_HASH" \
             -var "r2_account_id=$R2_ACCOUNT_ID" \
