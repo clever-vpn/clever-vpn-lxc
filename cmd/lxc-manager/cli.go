@@ -242,15 +242,16 @@ func cmdRenameUser() {
 // ==================== add-node ====================
 
 func cmdAddNode() {
-	if len(os.Args) < 4 {
-		fmt.Fprintf(os.Stderr, "Usage: lxc-manager add-node <name> <host> [--port PORT]\n")
+	if len(os.Args) < 5 {
+		fmt.Fprintf(os.Stderr, "Usage: lxc-manager add-node <name> <host> <region> [--port PORT]\n")
 		fmt.Fprintf(os.Stderr, "  SSH password is read from SSH_PASSWORD env var or stdin.\n")
 		os.Exit(1)
 	}
 	name := os.Args[2]
 	host := os.Args[3]
+	region := os.Args[4]
 	port := 22
-	for i := 4; i < len(os.Args); i++ {
+	for i := 5; i < len(os.Args); i++ {
 		if os.Args[i] == "--port" && i+1 < len(os.Args) {
 			fmt.Sscanf(os.Args[i+1], "%d", &port)
 			i++
@@ -268,50 +269,57 @@ func cmdAddNode() {
 	}
 
 	loadNodes()
-	rec, err := provisionNode(name, host, port, password)
+	rec, err := provisionNode(name, region, host, port, password)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Provision failed: %v\n", err)
 		os.Exit(1)
 	}
 
-	if err := addNode(name, rec); err != nil {
+	if err := addNode(rec); err != nil {
 		fmt.Fprintf(os.Stderr, "Register node: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("Node added:\n  name: %s\n  url: %s\n", rec.Name, rec.URL)
+	fmt.Printf("Node added:\n  id: %s\n  name: %s\n  region: %s\n  url: %s\n", rec.ID, rec.Name, rec.Region, rec.URL)
 }
 
 // ==================== remove-node ====================
 
 func cmdRemoveNode() {
 	if len(os.Args) < 3 {
-		fmt.Fprintf(os.Stderr, "Usage: lxc-manager remove-node <name>\n")
+		fmt.Fprintf(os.Stderr, "Usage: lxc-manager remove-node <id or name>\n")
 		os.Exit(1)
 	}
-	name := os.Args[2]
+	input := os.Args[2]
 
 	loadNodes()
-	if err := removeNode(name); err != nil {
+	// Resolve by ID first, then name
+	nodeID := resolveNodeByNameOrID(input)
+	if nodeID == "" {
+		fmt.Fprintf(os.Stderr, "Error: node %s not found\n", input)
+		os.Exit(1)
+	}
+	if err := removeNode(nodeID); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("Node removed: %s\n", name)
+	fmt.Printf("Node removed: %s\n", nodeID)
 }
 
 // ==================== list-nodes ====================
 
 func cmdListNodes() {
 	loadNodes()
-	if len(nodes) == 0 {
+	list := listNodesSlice()
+	if len(list) == 0 {
 		fmt.Println("No nodes.")
 		return
 	}
-	fmt.Printf("%-20s %-35s %s\n", "NAME", "URL", "SSH")
+	fmt.Printf("%-24s %-15s %-10s %-35s %s\n", "ID", "NAME", "REGION", "URL", "SSH")
 	nodesMu.Lock()
 	defer nodesMu.Unlock()
-	for _, n := range nodes {
-		fmt.Printf("%-20s %-35s %s:%d\n", n.Name, n.URL, n.SSHHost, n.SSHPort)
+	for _, n := range list {
+		fmt.Printf("%-24s %-15s %-10s %-35s %s:%d\n", n.ID, n.Name, n.Region, n.URL, n.SSHHost, n.SSHPort)
 	}
 }
 

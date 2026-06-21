@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -18,7 +19,9 @@ import (
 // ==================== Node Registry ====================
 
 type NodeRecord struct {
+	ID      string `json:"id"`
 	Name    string `json:"name"`
+	Region  string `json:"region"`
 	URL     string `json:"url"`
 	Network string `json:"network"`
 	SSHHost string `json:"sshHost"`
@@ -27,12 +30,23 @@ type NodeRecord struct {
 }
 
 var (
-	nodesFile string
-	nodesMu   sync.Mutex
-	nodes     = map[string]*NodeRecord{}
-	pool      = map[string]*lxc.Client{}
-	poolMu    sync.Mutex
+	nodesFile   string
+	nodesMu     sync.Mutex
+	nodes       = map[string]*NodeRecord{} // id → record
+
+	// Runtime index: region → ordered node IDs.
+	regionNodes = map[string][]string{}
+	// No round-robin cursor — use container count based selection instead.
+
+	pool   = map[string]*lxc.Client{}
+	poolMu sync.Mutex
 )
+
+func generateNodeID() string {
+	b := make([]byte, 8)
+	rand.Read(b)
+	return fmt.Sprintf("nd_%x", b)
+}
 
 func loadNodes() {
 	nodesFile = filepath.Join(ensureDataDir(), "nodes.json")
@@ -44,6 +58,10 @@ func loadNodes() {
 	if err := json.Unmarshal(data, &nodes); err != nil {
 		log.Fatalf("parse nodes: %v", err)
 	}
+	// Rebuild region index
+	for id, rec := range nodes {
+		regionNodes[rec.Region] = append(regionNodes[rec.Region], id)
+	}
 	log.Printf("Loaded %d node(s)", len(nodes))
 }
 
@@ -52,42 +70,132 @@ func saveNodes() {
 	os.WriteFile(nodesFile, data, 0600)
 }
 
-func addNode(name string, rec *NodeRecord) error {
+func addNode(rec *NodeRecord) error {
 	nodesMu.Lock()
 	defer nodesMu.Unlock()
-	if _, exists := nodes[name]; exists {
-		return fmt.Errorf("node %s already exists", name)
+
+	// Check name uniqueness
+	for _, n := range nodes {
+		if n.Name == rec.Name {
+			return fmt.Errorf("node name %s already exists", rec.Name)
+		}
 	}
-	nodes[name] = rec
+	if rec.ID == "" {
+		rec.ID = generateNodeID()
+	}
+	nodes[rec.ID] = rec
+	regionNodes[rec.Region] = append(regionNodes[rec.Region], rec.ID)
 	saveNodes()
 	return nil
 }
 
-func removeNode(name string) error {
+func removeNode(nodeID string) error {
 	nodesMu.Lock()
 	defer nodesMu.Unlock()
-	if _, ok := nodes[name]; !ok {
-		return fmt.Errorf("node %s not found", name)
+
+	rec, ok := nodes[nodeID]
+	if !ok {
+		return fmt.Errorf("node %s not found", nodeID)
 	}
-	delete(nodes, name)
+	// Remove from region index
+	ids := regionNodes[rec.Region]
+	for i, id := range ids {
+		if id == nodeID {
+			regionNodes[rec.Region] = append(ids[:i], ids[i+1:]...)
+			break
+		}
+	}
+	if len(regionNodes[rec.Region]) == 0 {
+		delete(regionNodes, rec.Region)
+	}
+	delete(nodes, nodeID)
 	saveNodes()
-	removeNodeClient(name)
+	removeNodeClient(nodeID)
 	return nil
+}
+
+// pickNode selects the node with the fewest containers in the given region.
+// Returns the node ID and a connected client.
+func pickNode(region string) (string, *lxc.Client, error) {
+	nodesMu.Lock()
+	ids := regionNodes[region]
+	if len(ids) == 0 {
+		nodesMu.Unlock()
+		return "", nil, fmt.Errorf("no nodes in region %s", region)
+	}
+
+	// Count containers per node in this region
+	instMu.Lock()
+	nodeCounts := map[string]int{}
+	for _, rec := range instances {
+		nodeCounts[rec.Node]++
+	}
+	instMu.Unlock()
+
+	// Find node with fewest containers; tie-break by ID order
+	var bestID string
+	bestCount := -1
+	for _, id := range ids {
+		cnt := nodeCounts[id]
+		if bestCount == -1 || cnt < bestCount {
+			bestCount = cnt
+			bestID = id
+		}
+	}
+	nodesMu.Unlock()
+
+	c, err := getNodeClient(bestID)
+	if err != nil {
+		return "", nil, fmt.Errorf("connect node %s: %w", bestID, err)
+	}
+	return bestID, c, nil
+}
+
+// resolveNodeByNameOrID resolves a name or ID to node ID. Returns "" if not found.
+func resolveNodeByNameOrID(input string) string {
+	nodesMu.Lock()
+	defer nodesMu.Unlock()
+
+	if _, ok := nodes[input]; ok {
+		return input
+	}
+	for id, rec := range nodes {
+		if rec.Name == input {
+			return id
+		}
+	}
+	return ""
+}
+
+// listNodesSlice returns all nodes as a slice (for API responses).
+func listNodesSlice() []*NodeRecord {
+	nodesMu.Lock()
+	defer nodesMu.Unlock()
+
+	var result []*NodeRecord
+	for _, rec := range nodes {
+		result = append(result, rec)
+	}
+	return result
 }
 
 // ==================== Connection Pool ====================
 
-func getNodeClient(nodeName string) (*lxc.Client, error) {
+func getNodeClient(nodeID string) (*lxc.Client, error) {
 	poolMu.Lock()
 	defer poolMu.Unlock()
+	return getNodeClientLocked(nodeID)
+}
 
-	if c, ok := pool[nodeName]; ok {
+// getNodeClientLocked must be called with poolMu held.
+func getNodeClientLocked(nodeID string) (*lxc.Client, error) {
+	if c, ok := pool[nodeID]; ok {
 		return c, nil
 	}
 
-	n, ok := nodes[nodeName]
+	n, ok := nodes[nodeID]
 	if !ok {
-		return nil, fmt.Errorf("node %s not found", nodeName)
+		return nil, fmt.Errorf("node %s not found", nodeID)
 	}
 
 	clientCert := loadFile(env("LXD_CLIENT_CERT", "client.crt"))
@@ -95,16 +203,16 @@ func getNodeClient(nodeName string) (*lxc.Client, error) {
 
 	c, err := lxc.NewClient(n.URL, clientCert, clientKey)
 	if err != nil {
-		return nil, fmt.Errorf("connect node %s: %w", nodeName, err)
+		return nil, fmt.Errorf("connect node %s: %w", nodeID, err)
 	}
-	pool[nodeName] = c
+	pool[nodeID] = c
 	return c, nil
 }
 
-func removeNodeClient(nodeName string) {
+func removeNodeClient(nodeID string) {
 	poolMu.Lock()
 	defer poolMu.Unlock()
-	delete(pool, nodeName)
+	delete(pool, nodeID)
 }
 
 var localClient *lxc.Client
@@ -120,8 +228,8 @@ func getDefaultClient() (*lxc.Client, error) {
 		}
 		return localClient, nil
 	}
-	for name := range nodes {
-		return getNodeClient(name)
+	for id := range nodes {
+		return getNodeClient(id)
 	}
 	return nil, fmt.Errorf("no nodes available")
 }
@@ -166,8 +274,8 @@ func scpBytes(client *ssh.Client, remotePath string, data []byte, mode string) e
 	return nil
 }
 
-func provisionNode(name, host string, port int, password string) (*NodeRecord, error) {
-	log.Printf("Provisioning node %s (%s:%d)...", name, host, port)
+func provisionNode(name, region, host string, port int, password string) (*NodeRecord, error) {
+	log.Printf("Provisioning node %s (%s:%d region=%s)...", name, host, port, region)
 
 	client, err := sshConnect(host, port, password)
 	if err != nil {
@@ -225,7 +333,9 @@ func provisionNode(name, host string, port int, password string) (*NodeRecord, e
 	img := env("LXC_BASE_IMAGE", "clever-vpn-base")
 
 	rec := &NodeRecord{
+		ID:      generateNodeID(),
 		Name:    name,
+		Region:  region,
 		URL:     fmt.Sprintf("https://%s:8443", host),
 		Network: net,
 		SSHHost: host,

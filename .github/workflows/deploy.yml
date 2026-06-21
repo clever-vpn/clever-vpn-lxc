@@ -79,6 +79,41 @@ jobs:
 
           echo "LXC_MANAGER_VERSION=${RESOLVED}" >> "${GITHUB_ENV}"
 
+      - name: Clean up stale Cloudflare DNS records
+        if: inputs.action == 'deploy'
+        env:
+          CF_API_TOKEN: ${{ env.CF_API_TOKEN }}
+        run: |
+          ZONE_NAME="clever-clouds.com"
+          RECORD_NAME="lxc-api"
+
+          ZONE_ID=$(curl -s -H "Authorization: Bearer $CF_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/zones?name=$ZONE_NAME" | \
+            jq -r '.result[0].id')
+
+          if [[ -z "$ZONE_ID" || "$ZONE_ID" == "null" ]]; then
+            echo "ERROR: could not find zone $ZONE_NAME"
+            exit 1
+          fi
+
+          echo "Zone ID: $ZONE_ID"
+
+          for type in A AAAA; do
+            RECORD_IDS=$(curl -s -H "Authorization: Bearer $CF_API_TOKEN" \
+              "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records?type=$type&name=$RECORD_NAME.$ZONE_NAME" | \
+              jq -r '.result[].id')
+
+            if [[ -n "$RECORD_IDS" ]]; then
+              for rid in $RECORD_IDS; do
+                echo "Deleting stale $type record: $rid"
+                curl -s -X DELETE -H "Authorization: Bearer $CF_API_TOKEN" \
+                  "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records/$rid"
+              done
+            else
+              echo "No stale $type records found for $RECORD_NAME.$ZONE_NAME"
+            fi
+          done
+
       - name: Terraform Init
         env:
           TF_BACKEND_R2_ACCOUNT_ID: ${{ env.R2_ACCOUNT_ID }}

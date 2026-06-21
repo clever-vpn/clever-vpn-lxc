@@ -31,7 +31,7 @@ type CreateReq struct {
 	Disk        int    `json:"disk"`
 	ServicePort int    `json:"servicePort"`
 	UserData    string `json:"userData"`
-	Node        string `json:"node"`
+	Region      string `json:"region"`
 }
 
 type CreateResp struct {
@@ -42,6 +42,7 @@ type CreateResp struct {
 	CPU      int      `json:"cpu"`
 	Mem      int      `json:"mem"`
 	Disk     int      `json:"disk"`
+	NodeID   string   `json:"nodeID"`
 }
 
 type PortInfo struct {
@@ -288,15 +289,24 @@ func handleCreate(w http.ResponseWriter, r *http.Request) {
 	if req.CPU <= 0 { req.CPU = 1 }
 	if req.Mem <= 0 { req.Mem = 512 }
 
-	cli := lxdClient
-	nodeName := req.Node
-	if nodeName != "" {
-		c, err := getNodeClient(nodeName)
+	var cli *lxc.Client
+	var nodeID string
+	region := req.Region
+
+	if region != "" {
+		var err error
+		nodeID, cli, err = pickNode(region)
 		if err != nil {
-			jsonError(w, fmt.Sprintf("node %s: %v", nodeName, err), 400)
+			jsonError(w, fmt.Sprintf("region %s: %v", region, err), 400)
 			return
 		}
-		cli = c
+	} else {
+		var err error
+		cli, err = getDefaultClient()
+		if err != nil {
+			jsonError(w, "no nodes available, add a node first: lxc-manager add-node", 400)
+			return
+		}
 	}
 	if cli == nil {
 		jsonError(w, "no nodes available, add a node first: lxc-manager add-node", 400)
@@ -314,7 +324,7 @@ func handleCreate(w http.ResponseWriter, r *http.Request) {
 		ServicePort: req.ServicePort,
 		UserID:      getUserIDByToken(req.Token),
 		Token:       req.Token,
-		Node:        nodeName,
+		Node:        nodeID,
 	}
 
 	password := ""
@@ -329,8 +339,8 @@ func handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ports := PortInfo{SSH: rec.SSHExtPort, Service: rec.ServiceExtPort}
-	log.Printf("Creating %s (node=%s cpu=%d mem=%dMB disk=%dGB ssh=%d svc=%d)",
-		name, nodeName, req.CPU, req.Mem, req.Disk, ports.SSH, ports.Service)
+	log.Printf("Creating %s (region=%s node=%s cpu=%d mem=%dMB disk=%dGB ssh=%d svc=%d)",
+		name, region, nodeID, req.CPU, req.Mem, req.Disk, ports.SSH, ports.Service)
 
 	userData := mergeUserData(req.UserData, name, bootstrapEnv(name, req.CPU, req.Mem, req.Disk, ports), password)
 	if err := cli.CreateContainer(name, img, net, req.CPU, req.Mem, req.Disk, map[string]string{"cloud-init.user-data": userData}); err != nil {
@@ -362,7 +372,7 @@ func handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("Ports: ssh=%d, svc=%d -> %s", ports.SSH, ports.Service, vip)
 
-	resp := CreateResp{Status: "creating", Name: name, Ports: ports, CPU: req.CPU, Mem: req.Mem, Disk: req.Disk}
+	resp := CreateResp{Status: "creating", Name: name, Ports: ports, CPU: req.CPU, Mem: req.Mem, Disk: req.Disk, NodeID: nodeID}
 	if password != "" { resp.Password = password }
 	jsonOK(w, resp)
 }
@@ -447,6 +457,7 @@ func handleResize(w http.ResponseWriter, r *http.Request) {
 func handleNodeAdd(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name        string `json:"name"`
+		Region      string `json:"region"`
 		SSHHost     string `json:"sshHost"`
 		SSHPort     int    `json:"sshPort"`
 		SSHPassword string `json:"sshPassword"`
@@ -454,36 +465,60 @@ func handleNodeAdd(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "invalid body", 400); return
 	}
-	if req.Name == "" || req.SSHHost == "" || req.SSHPassword == "" {
-		jsonError(w, "name, sshHost, sshPassword required", 400); return
+	if req.Name == "" || req.Region == "" || req.SSHHost == "" || req.SSHPassword == "" {
+		jsonError(w, "name, region, sshHost, sshPassword required", 400); return
 	}
 	if req.SSHPort == 0 { req.SSHPort = 22 }
 
-	rec, err := provisionNode(req.Name, req.SSHHost, req.SSHPort, req.SSHPassword)
+	rec, err := provisionNode(req.Name, req.Region, req.SSHHost, req.SSHPort, req.SSHPassword)
 	if err != nil {
 		jsonError(w, fmt.Sprintf("provision: %v", err), 500); return
 	}
 
-	if err := addNode(req.Name, rec); err != nil {
+	if err := addNode(rec); err != nil {
 		jsonError(w, fmt.Sprintf("register node: %v", err), 500); return
 	}
 
-	log.Printf("Node %s ready: %s", req.Name, rec.URL)
-	jsonOK(w, map[string]string{"status": "ready", "name": rec.Name, "url": rec.URL})
+	log.Printf("Node %s ready: %s (region=%s)", rec.Name, rec.URL, rec.Region)
+	jsonOK(w, map[string]interface{}{
+		"status": "ready",
+		"id":     rec.ID,
+		"name":   rec.Name,
+		"region": rec.Region,
+		"url":    rec.URL,
+	})
 }
 
 func handleNodeList(w http.ResponseWriter, r *http.Request) {
-	nodesMu.Lock()
-	defer nodesMu.Unlock()
-	jsonOK(w, nodes)
+	jsonOK(w, listNodesSlice())
 }
 
 func handleNodeDelete(w http.ResponseWriter, r *http.Request) {
-	name := stripPrefix(r.URL.Path, "/api/nodes/")
-	if name == "" { jsonError(w, "name required", 400); return }
-	if err := removeNode(name); err != nil { jsonError(w, err.Error(), 404); return }
-	log.Printf("Node %s removed", name)
-	jsonOK(w, map[string]string{"status": "removed"})
+	nodeID := stripPrefix(r.URL.Path, "/api/nodes/")
+	if nodeID == "" { jsonError(w, "node id required", 400); return }
+	if err := removeNode(nodeID); err != nil { jsonError(w, err.Error(), 404); return }
+	log.Printf("Node %s removed", nodeID)
+	jsonOK(w, map[string]string{"status": "removed", "nodeID": nodeID})
+}
+
+func handleNodeContainers(w http.ResponseWriter, r *http.Request) {
+	nodeID := stripPrefix(strings.TrimSuffix(r.URL.Path, "/containers"), "/api/nodes/")
+	if nodeID == "" { jsonError(w, "node id required", 400); return }
+
+	instMu.Lock()
+	var result []map[string]interface{}
+	for name, rec := range instances {
+		if rec.Node == nodeID {
+			result = append(result, map[string]interface{}{
+				"name":   name,
+				"userID": rec.UserID,
+				"plan":   map[string]int{"cpu": rec.CPU, "mem": rec.Mem, "disk": rec.Disk},
+				"ports":  map[string]int{"ssh": rec.SSHExtPort, "service": rec.ServiceExtPort},
+			})
+		}
+	}
+	instMu.Unlock()
+	jsonOK(w, result)
 }
 
 // ==================== User Handlers ====================
@@ -608,7 +643,13 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	case p == "/api/nodes" && r.Method == "GET":
 		if !validateAdminToken(adminTokenFromRequest(r)) { jsonError(w, "unauthorized", 401); return }
 		handleNodeList(w, r)
+	case strings.HasPrefix(p, "/api/nodes/") && strings.HasSuffix(p, "/containers") && r.Method == "GET":
+		if !validateAdminToken(adminTokenFromRequest(r)) { jsonError(w, "unauthorized", 401); return }
+		handleNodeContainers(w, r)
 	case strings.HasPrefix(p, "/api/nodes/") && r.Method == "DELETE":
+		if strings.HasSuffix(p, "/containers") {
+			jsonError(w, "not found", 404); return
+		}
 		if !validateAdminToken(adminTokenFromRequest(r)) { jsonError(w, "unauthorized", 401); return }
 		handleNodeDelete(w, r)
 	// Users (admin auth)
