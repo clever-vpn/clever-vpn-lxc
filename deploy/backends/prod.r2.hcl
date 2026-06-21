@@ -5,7 +5,7 @@
 #
 # Usage: terraform init -backend-config=backends/prod.r2.hcl
 
-endpoint                = "https://${TF_BACKEND_R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+endpoints               = { s3 = "https://${TF_BACKEND_R2_ACCOUNT_ID}.r2.cloudflarestorage.com" }
 bucket                  = "tfstate"
 key                     = "clever-vpn-lxc/infra.tfstate"
 region                  = "auto"
