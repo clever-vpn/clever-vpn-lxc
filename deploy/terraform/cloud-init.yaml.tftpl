@@ -60,17 +60,17 @@ runcmd:
     SHA="$ASSET.sha256"
 
     cd /tmp
-    for i in 1 2 3 4 5; do
+    for i in $(seq 1 10); do
       if curl -fsSLo "$SHA" "$BASE/$SHA" && curl -fsSLo "$ASSET" "$BASE/$ASSET"; then
         echo "Download succeeded on attempt $i"
         break
       fi
-      echo "Download attempt $i failed, retrying in 15s..."
-      sleep 15
+      echo "Download attempt $i failed, retrying in 30s..."
+      sleep 30
     done
 
     if [ ! -f "$ASSET" ] || [ ! -f "$SHA" ]; then
-      echo "ERROR: download failed after 3 attempts"
+      echo "ERROR: download failed after 10 attempts"
       exit 1
     fi
 
