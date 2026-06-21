@@ -6,15 +6,20 @@
 
 ```bash
 # 1. 下载二进制（从 GitHub Releases）
-curl -LO https://github.com/clever-vpn/clever-vpn-lxc/releases/latest/download/lxc-manager-linux-amd64
-chmod +x lxc-manager-linux-amd64
-mv lxc-manager-linux-amd64 /usr/local/bin/lxc-manager
+curl -LO https://github.com/clever-vpn/clever-vpn-lxc/releases/latest/download/lxc-manager-amd64-latest.gz
+gunzip lxc-manager-amd64-latest.gz
+chmod +x lxc-manager-amd64-latest
+mv lxc-manager-amd64-latest /usr/local/bin/lxc-manager
 
 # 2. 生成客户端证书（用于连接 LXD 节点）
 lxc-manager cert gen
 
-# 3. 创建管理员 token
-lxc-manager admin create superadmin
+# 3. 管理员登录获取 token
+curl -X POST https://lxc-api.clever-clouds.com/api/admin/login \
+  -H "Content-Type: application/json" \
+  -d '{"password": "your-admin-password"}'
+
+# 响应: {"adminToken": "cva_xxx..."}
 
 # 4. 安装并启动（带自动 TLS）
 lxc-manager install --domain your-domain.com
@@ -32,10 +37,15 @@ lxc-manager install --domain your-domain.com
 | `lxc-manager add-node <name> <host>` | SSH 供给新节点 |
 | `lxc-manager remove-node <name>` | 移除节点 |
 | `lxc-manager list-nodes` | 列出所有节点 |
-| `lxc-manager add-user <name>` | 创建用户 token（cvl_ 前缀） |
-| `lxc-manager remove-user <name>` | 删除用户 |
-| `lxc-manager list-users` | 列出用户及其容器数 |
-| `lxc-manager --version` | 显示版本号 |
+| `lxc-manager add-user <name>` | 创建用户（返回 userID + token） |
+| `lxc-manager remove-user <id或name>` | 删除用户（销毁其所有容器） |
+| `lxc-manager reset-user-token <id或name>` | 重置用户 token |
+| `lxc-manager rename-user <id或name> <新名称>` | 修改用户名称 |
+| `lxc-manager list-users` | 列出用户（ID / 名称 / 容器数） |
+| `lxc-manager version` | 显示版本号 |
+| `lxc-manager update [--tag v1.0.0]` | 从 GitHub Releases 自更新 |
+| `lxc-manager backup` | 手动备份数据到 R2/S3 |
+| `lxc-manager restore` | 从 R2/S3 恢复数据 |
 
 ## REST API
 
@@ -45,12 +55,15 @@ lxc-manager install --domain your-domain.com
 |------|------|------|------|
 | `GET` | `/_version` | 无 | 版本号 |
 | `GET` | `/api/health` | 无 | 健康检查 |
+| `POST` | `/api/admin/login` | 无 | 管理员登录（密码 → token） |
 | `POST` | `/api/nodes` | admin | 添加节点 |
 | `GET` | `/api/nodes` | admin | 列出节点 |
 | `DELETE` | `/api/nodes/:name` | admin | 删除节点 |
-| `POST` | `/api/users` | admin | 创建用户 |
-| `GET` | `/api/users` | admin | 列出用户 |
-| `DELETE` | `/api/users/:name` | admin | 删除用户 |
+| `POST` | `/api/users` | admin | 创建用户（返回 userID + name + token） |
+| `GET` | `/api/users` | admin | 列出用户（id / name / containers） |
+| `DELETE` | `/api/users/:id` | admin | 删除用户（销毁所有容器） |
+| `PUT` | `/api/users/:id/token` | admin | 重置用户 token |
+| `PUT` | `/api/users/:id/name` | admin | 修改用户名称 |
 | `POST` | `/api/containers` | user | 创建容器 |
 | `GET` | `/api/containers` | user | 列出容器 |
 | `GET` | `/api/containers/:name` | user | 查看容器 |
@@ -68,23 +81,55 @@ lxc-manager install --domain your-domain.com
 POST /api/containers
 {
   "token": "cvl_xxxxxxxx",
-  "plan": "free",
+  "cpu": 1,
+  "mem": 512,
+  "disk": 10,
   "servicePort": 443,
   "node": "tokyo",
   "userData": "#cloud-config\n..."
 }
 ```
 
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `token` | string | ✅ | 用户 token |
+| `cpu` | int | ❌ | CPU 核数，默认 1 |
+| `mem` | int | ❌ | 内存 (MB)，默认 512 |
+| `disk` | int | ❌ | 磁盘上限 (GB)，0 或不传 = 不受限 |
+| `servicePort` | int | ✅ | 容器内服务端口 (1-65535) |
+| `node` | string | ❌ | 指定节点名，空则自动分配 |
+| `userData` | string | ❌ | cloud-init 配置，空则自动设密码 |
+
 ```json
 {
   "status": "creating",
   "name": "user-a1b2c3d4-...",
   "password": "generated-password",
+  "cpu": 1,
+  "mem": 512,
+  "disk": 10,
   "ports": {
     "ssh": 22000,
     "service": 50000
   }
 }
+```
+
+### 调整规格
+
+可单独调整任一参数，0 表示保持不变。
+
+```json
+PUT /api/containers/{name}/resize
+{
+  "cpu": 2,
+  "mem": 2048,
+  "disk": 20
+}
+```
+
+```json
+{ "status": "resized", "cpu": 2, "mem": 2048, "disk": 20 }
 ```
 
 ### 添加节点
@@ -98,14 +143,6 @@ POST /api/nodes
   "sshPassword": "..."
 }
 ```
-
-## 容器规格
-
-| Plan | CPU | Memory |
-|------|-----|--------|
-| free | 1 | 512 MB |
-| basic | 1 | 1 GB |
-| pro | 2 | 2 GB |
 
 ## 端口分配
 
@@ -147,9 +184,11 @@ POST /api/nodes
 
 ## 数据文件
 
+所有数据存储在 `DATA_DIR`（默认 `/var/lib/clever-vpn-lxc`）：
+
 ```
 /var/lib/clever-vpn-lxc/
-├── tokens.json        ← 用户 token
+├── users.json         ← 用户记录（含 token）
 ├── admin-tokens.json  ← 管理员 token
 ├── nodes.json         ← 节点注册表
 ├── instances.json     ← 容器实例注册表
@@ -157,6 +196,102 @@ POST /api/nodes
     ├── acme_account+key
     └── your-domain.com
 ```
+
+### users.json
+
+用户记录，key 为不可变的 `userID`。`tokens` 数组是业务状态的一部分；运行时额外构建 `token → userID` 映射仅用于加速查询。
+
+```json
+{
+  "u_a1b2c3d4": {
+    "id": "u_a1b2c3d4",
+    "name": "alice",
+    "tokens": ["cvl_abc123..."]
+  },
+  "u_e5f6g7h8": {
+    "id": "u_e5f6g7h8",
+    "name": "bob",
+    "tokens": ["cvl_def456..."]
+  }
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `id` | string | 不可变唯一标识，创建时自动生成 (前缀 `u_`) |
+| `name` | string | 显示名称，可通过 `rename-user` 修改 |
+| `tokens` | []string | 该用户的活跃认证 token 列表 |
+
+### admin-tokens.json
+
+管理员 token，key 为 token，value 为名称。
+
+```json
+{
+  "cva_xyz789...": "superadmin"
+}
+```
+
+### nodes.json
+
+LXD 节点注册表，key 为节点名称。
+
+```json
+{
+  "tokyo": {
+    "name": "tokyo",
+    "url": "https://192.168.1.10:8443",
+    "network": "vpnbr0",
+    "sshHost": "192.168.1.10",
+    "sshPort": 22,
+    "image": "clever-vpn-base"
+  }
+}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `name` | 节点唯一名称 |
+| `url` | LXD HTTPS API 地址 |
+| `network` | 容器网桥名称 |
+| `sshHost` / `sshPort` | 供给时使用的 SSH 信息 |
+| `image` | 容器基础镜像别名 |
+
+### instances.json
+
+容器实例注册表，key 为容器名。
+
+```json
+{
+  "user-3f8a1b2c": {
+    "cpu": 1,
+    "mem": 512,
+    "disk": 10,
+    "servicePort": 443,
+    "sshExtPort": 22001,
+    "serviceExtPort": 50001,
+    "userID": "u_a1b2c3d4",
+    "token": "cvl_abc123...",
+    "password": "Ab3Xy9...",
+    "node": "tokyo",
+    "created": "2026-06-21T10:30:00Z"
+  }
+}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `cpu` | CPU 核数 |
+| `mem` | 内存限制 (MB) |
+| `disk` | 磁盘上限 (GB)，0 = 不受限 |
+| `servicePort` | 容器内服务端口 |
+| `sshExtPort` | 外网 SSH 端口 (22000–22999) |
+| `serviceExtPort` | 外网服务端口 (50000–54999) |
+| `userID` | 所属用户的不可变标识 |
+| `token` | 创建时使用的认证 token |
+| `password` | 容器 root 密码（自动生成时） |
+| `node` | 所在节点名（空表示本地） |
+| `created` | 创建时间 (UTC) |
 
 ## 容器安全设置
 
@@ -186,10 +321,46 @@ POST /api/nodes
 
 手动触发 `.github/workflows/release.yml`：
 
-- **输入版本号**：检查 tag 不存在 → 构建 amd64/arm64 → 打 tag → 发布到 GitHub Releases
-- **留空自动升降**：取最新 tag 的 patch 位 +1 作为新版本
+- **输入版本号**：检查 tag 不存在 → 构建 amd64/arm64 → gzip 压缩 → 生成 sha256 → 打 tag → 发布到 GitHub Releases
+- **留空自动升版**：取最新 tag 的 patch 位 +1 作为新版本
+
+构建产物（`{name}-{arch}-{tag}.gz` + `.sha256`）供 `lxc-manager update` 命令下载。
 
 构建时通过 ldflags 注入版本号：`-ldflags "-X main.version=v1.2.3"`
+
+### 部署到 Vultr
+
+手动触发 `.github/workflows/deploy.yml`：
+
+1. 选择 `deploy` 或 `destroy`
+2. 指定 lxc-manager 版本（默认 `latest`）
+
+通过 Terraform 创建 Vultr VPS，cloud-init 自动安装配置 lxc-manager，Cloudflare DNS 同步 `lxc-api.clever-clouds.com` 记录。
+
+所有密钥通过 Bitwarden Secrets Manager 注入。部署前需要准备以下内容并存入 Bitwarden：
+
+**生成管理员密码 bcrypt 哈希**：
+```bash
+# Linux / macOS (需要 whois 包)
+# Ubuntu/Debian: apt-get install -y whois
+# macOS:         brew install whois
+mkpasswd -m bcrypt "你的管理员密码"
+
+# 或者用 Python（无需额外安装）
+python3 -c '
+import bcrypt
+print(bcrypt.hashpw(b"your-password", bcrypt.gensalt(rounds=10)).decode())
+'
+# 如果提示 No module named bcrypt: pip3 install bcrypt
+
+# 或者用 htpasswd（Apache 工具）
+# Ubuntu/Debian: apt-get install -y apache2-utils
+htpasswd -bnBC 10 "" "你的管理员密码" | tr -d ':\n'
+```
+
+输出类似 `$2a$10$xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`，将这个哈希值存入 Bitwarden，GitHub Actions 部署时会将其注入 VPS 的 `/var/lib/clever-vpn-lxc/.admin-password`。
+
+管理员在浏览器中通过 `POST /api/admin/login` 用明文密码换取 token。
 
 ## R2 数据备份
 

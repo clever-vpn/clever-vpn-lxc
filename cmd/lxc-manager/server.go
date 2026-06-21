@@ -22,21 +22,13 @@ import (
 
 var lxdClient *lxc.Client
 
-// ==================== Plans ====================
-
-type Plan struct{ CPU, Mem int }
-
-var plans = map[string]Plan{
-	"free":  {1, 512},
-	"basic": {1, 1024},
-	"pro":   {2, 2048},
-}
-
 // ==================== Request / Response ====================
 
 type CreateReq struct {
 	Token       string `json:"token"`
-	Plan        string `json:"plan"`
+	CPU         int    `json:"cpu"`
+	Mem         int    `json:"mem"`
+	Disk        int    `json:"disk"`
 	ServicePort int    `json:"servicePort"`
 	UserData    string `json:"userData"`
 	Node        string `json:"node"`
@@ -47,6 +39,9 @@ type CreateResp struct {
 	Name     string   `json:"name"`
 	Password string   `json:"password,omitempty"`
 	Ports    PortInfo `json:"ports"`
+	CPU      int      `json:"cpu"`
+	Mem      int      `json:"mem"`
+	Disk     int      `json:"disk"`
 }
 
 type PortInfo struct {
@@ -54,16 +49,23 @@ type PortInfo struct {
 	Service int `json:"service"`
 }
 
-type ResizeReq struct{ Plan string `json:"plan"` }
+type ResizeReq struct {
+	CPU  int `json:"cpu"`
+	Mem  int `json:"mem"`
+	Disk int `json:"disk"`
+}
 type APIError struct{ Error string `json:"error"` }
 
 // ==================== Instance Registry ====================
 
 type InstanceRecord struct {
-	Plan           string    `json:"plan"`
+	CPU            int       `json:"cpu"`
+	Mem            int       `json:"mem"`
+	Disk           int       `json:"disk"`
 	ServicePort    int       `json:"servicePort"`
 	SSHExtPort     int       `json:"sshExtPort"`
 	ServiceExtPort int       `json:"serviceExtPort"`
+	UserID         string    `json:"userID"`
 	Token          string    `json:"token"`
 	Password       string    `json:"password,omitempty"`
 	Node           string    `json:"node"`
@@ -283,6 +285,8 @@ func handleCreate(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil { jsonError(w, "invalid body", 400); return }
 	if req.Token == "" || !validateUserToken(req.Token) { jsonError(w, "invalid token", 401); return }
 	if req.ServicePort <= 0 || req.ServicePort > 65535 { jsonError(w, "servicePort required (1-65535)", 400); return }
+	if req.CPU <= 0 { req.CPU = 1 }
+	if req.Mem <= 0 { req.Mem = 512 }
 
 	cli := lxdClient
 	nodeName := req.Node
@@ -300,13 +304,15 @@ func handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	name := env("LXC_NAME_PREFIX", "user-") + generateUUID()
-	p := planOf(req.Plan)
 	img := env("LXC_BASE_IMAGE", "clever-vpn-base")
 	net := env("LXC_NETWORK", "vpnbr0")
 
 	rec := &InstanceRecord{
-		Plan:        req.Plan,
+		CPU:         req.CPU,
+		Mem:         req.Mem,
+		Disk:        req.Disk,
 		ServicePort: req.ServicePort,
+		UserID:      getUserIDByToken(req.Token),
 		Token:       req.Token,
 		Node:        nodeName,
 	}
@@ -323,11 +329,11 @@ func handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ports := PortInfo{SSH: rec.SSHExtPort, Service: rec.ServiceExtPort}
-	log.Printf("Creating %s (node=%s plan=%s cpu=%d mem=%dMB ssh=%d svc=%d)",
-		name, nodeName, req.Plan, p.CPU, p.Mem, ports.SSH, ports.Service)
+	log.Printf("Creating %s (node=%s cpu=%d mem=%dMB disk=%dGB ssh=%d svc=%d)",
+		name, nodeName, req.CPU, req.Mem, req.Disk, ports.SSH, ports.Service)
 
-	userData := mergeUserData(req.UserData, name, bootstrapEnv(name, req.Plan, ports), password)
-	if err := cli.CreateContainer(name, img, net, p.CPU, p.Mem, map[string]string{"cloud-init.user-data": userData}); err != nil {
+	userData := mergeUserData(req.UserData, name, bootstrapEnv(name, req.CPU, req.Mem, req.Disk, ports), password)
+	if err := cli.CreateContainer(name, img, net, req.CPU, req.Mem, req.Disk, map[string]string{"cloud-init.user-data": userData}); err != nil {
 		unregisterInstance(name)
 		jsonError(w, fmt.Sprintf("create: %v", err), 500)
 		return
@@ -356,7 +362,7 @@ func handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("Ports: ssh=%d, svc=%d -> %s", ports.SSH, ports.Service, vip)
 
-	resp := CreateResp{Status: "creating", Name: name, Ports: ports}
+	resp := CreateResp{Status: "creating", Name: name, Ports: ports, CPU: req.CPU, Mem: req.Mem, Disk: req.Disk}
 	if password != "" { resp.Password = password }
 	jsonOK(w, resp)
 }
@@ -419,10 +425,21 @@ func handleResize(w http.ResponseWriter, r *http.Request) {
 	name := stripPrefix(strings.TrimSuffix(r.URL.Path, "/resize"), "/api/containers/")
 	var req ResizeReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil { jsonError(w, "invalid body", 400); return }
-	p, ok := plans[req.Plan]
-	if !ok { jsonError(w, "unknown plan", 400); return }
-	if err := clientForInstance(name).ResizeContainer(name, p.CPU, p.Mem); err != nil { jsonError(w, fmt.Sprintf("resize: %v", err), 500); return }
-	jsonOK(w, map[string]string{"status": "resized"})
+	if req.CPU <= 0 && req.Mem <= 0 && req.Disk <= 0 { jsonError(w, "cpu, mem, or disk required", 400); return }
+
+	instMu.Lock()
+	rec, ok := instances[name]
+	if ok {
+		if req.CPU > 0 { rec.CPU = req.CPU }
+		if req.Mem > 0 { rec.Mem = req.Mem }
+		if req.Disk > 0 { rec.Disk = req.Disk }
+		saveInstances()
+	}
+	instMu.Unlock()
+	if !ok { jsonError(w, "instance not found", 404); return }
+
+	if err := clientForInstance(name).ResizeContainer(name, rec.CPU, rec.Mem, rec.Disk); err != nil { jsonError(w, fmt.Sprintf("resize: %v", err), 500); return }
+	jsonOK(w, map[string]interface{}{"status": "resized", "cpu": rec.CPU, "mem": rec.Mem, "disk": rec.Disk})
 }
 
 // ==================== Node Handlers ====================
@@ -476,10 +493,10 @@ func handleUserCreate(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
 		jsonError(w, "name required", 400); return
 	}
-	token, err := addUserToken(req.Name)
+	userID, token, err := addUser(req.Name)
 	if err != nil { jsonError(w, err.Error(), 409); return }
-	log.Printf("User created: %s", req.Name)
-	jsonOK(w, map[string]string{"name": req.Name, "token": token})
+	log.Printf("User created: %s (%s)", req.Name, userID)
+	jsonOK(w, map[string]string{"userID": userID, "name": req.Name, "token": token})
 }
 
 func handleUserList(w http.ResponseWriter, r *http.Request) {
@@ -487,18 +504,103 @@ func handleUserList(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleUserDelete(w http.ResponseWriter, r *http.Request) {
-	name := stripPrefix(r.URL.Path, "/api/users/")
-	if name == "" { jsonError(w, "name required", 400); return }
-	if err := removeUserToken(name); err != nil { jsonError(w, err.Error(), 404); return }
-	log.Printf("User deleted: %s", name)
-	jsonOK(w, map[string]string{"status": "deleted", "name": name})
+	userID := stripPrefix(r.URL.Path, "/api/users/")
+	if userID == "" { jsonError(w, "user id required", 400); return }
+	if err := deleteUser(userID); err != nil { jsonError(w, err.Error(), 404); return }
+	jsonOK(w, map[string]string{"status": "deleted", "userID": userID})
+}
+
+func handleUserResetToken(w http.ResponseWriter, r *http.Request) {
+	userID := stripPrefix(strings.TrimSuffix(r.URL.Path, "/token"), "/api/users/")
+	if userID == "" { jsonError(w, "user id required", 400); return }
+
+	// Support name lookup for convenience
+	if resolved := resolveUserID(userID); resolved != "" {
+		userID = resolved
+	}
+
+	token, err := regenerateUserToken(userID)
+	if err != nil { jsonError(w, err.Error(), 404); return }
+
+	rec, _ := getUserByID(userID)
+	log.Printf("User token reset: %s (%s)", rec.Name, userID)
+	jsonOK(w, map[string]string{"userID": userID, "name": rec.Name, "token": token})
+}
+
+func handleUserRename(w http.ResponseWriter, r *http.Request) {
+	userID := stripPrefix(strings.TrimSuffix(r.URL.Path, "/name"), "/api/users/")
+	if userID == "" { jsonError(w, "user id required", 400); return }
+
+	if resolved := resolveUserID(userID); resolved != "" {
+		userID = resolved
+	}
+
+	var req struct{ Name string `json:"name"` }
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+		jsonError(w, "name required", 400); return
+	}
+
+	if err := updateUserName(userID, req.Name); err != nil {
+		jsonError(w, err.Error(), 400); return
+	}
+	rec, _ := getUserByID(userID)
+	jsonOK(w, map[string]string{"userID": rec.ID, "name": rec.Name})
+}
+
+// destroyContainer stops and deletes a container, cleaning up ports and registry.
+// Must NOT hold instMu lock when calling.
+func destroyContainer(name string) {
+	cli := clientForInstance(name)
+	container, err := cli.GetContainer(name)
+	if err != nil {
+		log.Printf("  container %s not found, cleaning registry only", name)
+		unregisterInstance(name)
+		return
+	}
+
+	vip, _ := cli.InstanceIPv4(name, 5*time.Second)
+	instMu.Lock()
+	rec, ok := instances[name]
+	instMu.Unlock()
+	if ok && vip != "" {
+		delPortForward(rec.SSHExtPort, vip, 22)
+		delPortForward(rec.ServiceExtPort, vip, rec.ServicePort)
+	}
+
+	if !strings.EqualFold(container.Status, "Stopped") {
+		if err := cli.StopContainer(name); err != nil {
+			log.Printf("  stop %s: %v", name, err)
+		}
+	}
+	if err := cli.DeleteContainer(name); err != nil {
+		log.Printf("  delete %s: %v", name, err)
+	}
+	unregisterInstance(name)
+	log.Printf("  container %s destroyed", name)
 }
 
 // ==================== HTTP Router ====================
 
+func handleAdminLogin(w http.ResponseWriter, r *http.Request) {
+	var req struct{ Password string `json:"password"` }
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Password == "" {
+		jsonError(w, "password required", 400)
+		return
+	}
+	token, err := loginAdmin(req.Password)
+	if err != nil {
+		jsonError(w, "invalid password", 401)
+		return
+	}
+	jsonOK(w, map[string]string{"adminToken": token})
+}
+
 func handler(w http.ResponseWriter, r *http.Request) {
 	p := r.URL.Path
 	switch {
+	// Admin login (no auth)
+	case p == "/api/admin/login" && r.Method == "POST":
+		handleAdminLogin(w, r)
 	// Nodes (admin auth)
 	case p == "/api/nodes" && r.Method == "POST":
 		if !validateAdminToken(adminTokenFromRequest(r)) { jsonError(w, "unauthorized", 401); return }
@@ -517,8 +619,17 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		if !validateAdminToken(adminTokenFromRequest(r)) { jsonError(w, "unauthorized", 401); return }
 		handleUserList(w, r)
 	case strings.HasPrefix(p, "/api/users/") && r.Method == "DELETE":
+		if strings.HasSuffix(p, "/token") || strings.HasSuffix(p, "/name") {
+			jsonError(w, "not found", 404); return
+		}
 		if !validateAdminToken(adminTokenFromRequest(r)) { jsonError(w, "unauthorized", 401); return }
 		handleUserDelete(w, r)
+	case strings.HasPrefix(p, "/api/users/") && strings.HasSuffix(p, "/token") && r.Method == "PUT":
+		if !validateAdminToken(adminTokenFromRequest(r)) { jsonError(w, "unauthorized", 401); return }
+		handleUserResetToken(w, r)
+	case strings.HasPrefix(p, "/api/users/") && strings.HasSuffix(p, "/name") && r.Method == "PUT":
+		if !validateAdminToken(adminTokenFromRequest(r)) { jsonError(w, "unauthorized", 401); return }
+		handleUserRename(w, r)
 	// Containers (user auth)
 	case p == "/api/containers" && r.Method == "POST":
 		handleCreate(w, r)
@@ -544,7 +655,8 @@ func cmdServe() {
 	applyCLIOverrides()
 	resolveBackupEnv()
 
-	loadUserTokens()
+	loadUsers()
+	loadAdminPassword()
 	loadAdminTokens()
 	loadInstances()
 	loadNodes()
@@ -621,11 +733,6 @@ func stripPrefix(path, prefix string) string {
 	return strings.TrimSuffix(strings.TrimPrefix(path, prefix), "/")
 }
 
-func planOf(name string) Plan {
-	if p, ok := plans[name]; ok { return p }
-	return plans["basic"]
-}
-
 func generateUUID() string {
 	b := make([]byte, 16)
 	rand.Read(b)
@@ -649,18 +756,28 @@ func indent(s, prefix string) string {
 	return strings.Join(lines, "\n")
 }
 
-func bootstrapEnv(name, plan string, ports PortInfo) string {
+func bootstrapEnv(name string, cpu, mem, disk int, ports PortInfo) string {
 	return strings.Join([]string{
 		envLine("INSTANCE_NAME", name),
-		envLine("INSTANCE_PLAN", plan),
+		envLine("INSTANCE_CPU", strconv.Itoa(cpu)),
+		envLine("INSTANCE_MEM_MB", strconv.Itoa(mem)),
+		envLine("INSTANCE_DISK_GB", strconv.Itoa(disk)),
 		envLine("INSTANCE_SSH_PORT", strconv.Itoa(ports.SSH)),
 		envLine("INSTANCE_SERVICE_PORT", strconv.Itoa(ports.Service)),
 	}, "\n") + "\n"
 }
 
 func injectBlock(hostname, bootstrapContent string) string {
-	return fmt.Sprintf("hostname: %s\npreserve_hostname: false\nwrite_files:\n  - path: /etc/clever-vpn/bootstrap.env\n    permissions: '0600'\n    owner: root:root\n    content: |\n%s",
-		hostname, indent(bootstrapContent, "      "))
+	// Journald config: limit logs to 100MB, retain 3 days max.
+	journaldConf := `[Journal]
+SystemMaxUse=100M
+MaxRetentionSec=3day
+`
+	return fmt.Sprintf(
+		"hostname: %s\npreserve_hostname: false\nwrite_files:\n"+
+			"  - path: /etc/clever-vpn/bootstrap.env\n    permissions: '0600'\n    owner: root:root\n    content: |\n%s"+
+			"  - path: /etc/systemd/journald.conf.d/50-limit.conf\n    permissions: '0644'\n    owner: root:root\n    content: |\n%s",
+		hostname, indent(bootstrapContent, "      "), indent(journaldConf, "      "))
 }
 
 func mergeUserData(userSupplied, hostname, bootstrapContent, password string) string {

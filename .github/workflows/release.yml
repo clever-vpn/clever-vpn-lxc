@@ -65,7 +65,9 @@ jobs:
         run: |
           GOOS=linux GOARCH=amd64 go build \
             -ldflags "-X main.version=${VERSION}" \
-            -o lxc-manager-linux-amd64 ./cmd/lxc-manager
+            -o lxc-manager-amd64-${VERSION} ./cmd/lxc-manager
+          gzip -c lxc-manager-amd64-${VERSION} > lxc-manager-amd64-${VERSION}.gz
+          sha256sum lxc-manager-amd64-${VERSION}.gz | awk '{print $1}' > lxc-manager-amd64-${VERSION}.sha256
 
       - name: Build (arm64)
         env:
@@ -73,7 +75,9 @@ jobs:
         run: |
           GOOS=linux GOARCH=arm64 go build \
             -ldflags "-X main.version=${VERSION}" \
-            -o lxc-manager-linux-arm64 ./cmd/lxc-manager
+            -o lxc-manager-arm64-${VERSION} ./cmd/lxc-manager
+          gzip -c lxc-manager-arm64-${VERSION} > lxc-manager-arm64-${VERSION}.gz
+          sha256sum lxc-manager-arm64-${VERSION}.gz | awk '{print $1}' > lxc-manager-arm64-${VERSION}.sha256
 
       - name: Create tag and release
         env:
@@ -89,5 +93,7 @@ jobs:
           gh release create "${VERSION}" \
             --title "${VERSION}" \
             --notes "Release ${VERSION}" \
-            lxc-manager-linux-amd64 \
-            lxc-manager-linux-arm64
+            lxc-manager-amd64-${VERSION}.gz \
+            lxc-manager-amd64-${VERSION}.sha256 \
+            lxc-manager-arm64-${VERSION}.gz \
+            lxc-manager-arm64-${VERSION}.sha256
