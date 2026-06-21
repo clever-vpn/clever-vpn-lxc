@@ -1,0 +1,19 @@
+[Unit]
+Description=Clever VPN LXC Manager
+Documentation=https://github.com/clever-vpn/clever-vpn-lxc
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=root
+Type=simple
+WorkingDirectory={{BINDIR}}
+ExecStart={{BINPATH}} serve {{ARGS}}
+Restart=always
+RestartSec=5s
+LimitNOFILE=65536
+
+Environment=DATA_DIR=/var/lib/clever-vpn-lxc
+
+[Install]
+WantedBy=multi-user.target

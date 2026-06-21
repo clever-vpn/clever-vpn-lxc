@@ -1,39 +1,77 @@
-# Clever VPN - LXC Controller
+# Clever VPN - LXC Manager
 
-## One-Click Install (Ubuntu 22.04+)
+单二进制 LXC 容器管理服务。通过 REST API 管理多节点 LXD 集群，支持自动 TLS (Let's Encrypt)、SSH 远程供给节点、Token 认证。
+
+## 快速开始
 
 ```bash
-bash -c "$(curl -L https://raw.githubusercontent.com/clever-vpn/clever-vpn-lxc/main/scripts/install.sh)"
+# 1. 下载二进制（从 GitHub Releases）
+curl -LO https://github.com/clever-vpn/clever-vpn-lxc/releases/latest/download/lxc-manager-linux-amd64
+chmod +x lxc-manager-linux-amd64
+mv lxc-manager-linux-amd64 /usr/local/bin/lxc-manager
+
+# 2. 生成客户端证书（用于连接 LXD 节点）
+lxc-manager cert gen
+
+# 3. 创建管理员 token
+lxc-manager admin create superadmin
+
+# 4. 安装并启动（带自动 TLS）
+lxc-manager install --domain your-domain.com
 ```
 
-This will:
-1. Install Go
-2. Clone this private repo
-3. Build the Go API
-4. Install LXD, create base image, start systemd service
+## CLI 命令
 
-## API Reference
+| 命令 | 说明 |
+|------|------|
+| `lxc-manager serve [--domain DOMAIN] [--port PORT]` | 启动 HTTP API 服务 |
+| `lxc-manager install [--domain DOMAIN]` | 安装为 systemd 服务 |
+| `lxc-manager uninstall` | 卸载 systemd 服务 |
+| `lxc-manager cert gen` | 生成 client.crt + client.key |
+| `lxc-manager admin create <name>` | 创建管理员 token（cva_ 前缀） |
+| `lxc-manager add-node <name> <host>` | SSH 供给新节点 |
+| `lxc-manager remove-node <name>` | 移除节点 |
+| `lxc-manager list-nodes` | 列出所有节点 |
+| `lxc-manager add-user <name>` | 创建用户 token（cvl_ 前缀） |
+| `lxc-manager remove-user <name>` | 删除用户 |
+| `lxc-manager list-users` | 列出用户及其容器数 |
+| `lxc-manager --version` | 显示版本号 |
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/api/containers` | Create container |
-| `GET` | `/api/containers` | List all user containers |
-| `GET` | `/api/containers/{name}` | Get container details |
-| `PUT` | `/api/containers/{name}/resize` | Change container plan |
-| `DELETE` | `/api/containers/{name}` | Destroy container |
-| `GET` | `/api/health` | Health check |
+## REST API
 
-### POST /api/containers
+### 端点
+
+| 方法 | 路径 | 认证 | 说明 |
+|------|------|------|------|
+| `GET` | `/_version` | 无 | 版本号 |
+| `GET` | `/api/health` | 无 | 健康检查 |
+| `POST` | `/api/nodes` | admin | 添加节点 |
+| `GET` | `/api/nodes` | admin | 列出节点 |
+| `DELETE` | `/api/nodes/:name` | admin | 删除节点 |
+| `POST` | `/api/users` | admin | 创建用户 |
+| `GET` | `/api/users` | admin | 列出用户 |
+| `DELETE` | `/api/users/:name` | admin | 删除用户 |
+| `POST` | `/api/containers` | user | 创建容器 |
+| `GET` | `/api/containers` | user | 列出容器 |
+| `GET` | `/api/containers/:name` | user | 查看容器 |
+| `DELETE` | `/api/containers/:name` | user | 删除容器 |
+| `PUT` | `/api/containers/:name/resize` | user | 调整规格 |
+
+### 认证传递
+
+- **Admin token**: POST/PUT 在 body 中传 `"adminToken":"cva_..."`，GET/DELETE 在 query 中传 `?adminToken=cva_...`
+- **User token**: POST body 中传 `"token":"cvl_..."`
+
+### 创建容器
 
 ```json
+POST /api/containers
 {
-  "plan": "basic",
-  "userId": 101,
-  "password": "optional-initial-password",
-  "sshKey": "ssh-ed25519 AAAA... user@example",
-  "installScriptUrl": "https://raw.githubusercontent.com/clever-vpn/clever-vpn-server/main/install.sh",
-  "version": "v2.1.4",
-  "token": "eyJ..."
+  "token": "cvl_xxxxxxxx",
+  "plan": "free",
+  "servicePort": 443,
+  "node": "tokyo",
+  "userData": "#cloud-config\n..."
 }
 ```
 
@@ -41,45 +79,27 @@ This will:
 {
   "status": "creating",
   "name": "user-a1b2c3d4-...",
-  "password": "generated-or-requested-password",
+  "password": "generated-password",
   "ports": {
-    "ssh": 20101,
-    "vpn": 10101
+    "ssh": 22000,
+    "service": 50000
   }
 }
 ```
 
-## Provisioning Model
+### 添加节点
 
-`clever-vpn-base` is the reusable base image. It should contain only shared packages and common runtime dependencies.
-
-Per-user values are injected at instance creation time through `cloud-init`, including:
-1. Root password
-2. User SSH public key
-3. Install script URL
-4. Application version and token
-5. Instance metadata written to `/etc/clever-vpn/bootstrap.env`
-
-During first boot, the controller runs the install script from cloud-init. For the Clever VPN server installer, that is the automation-friendly equivalent of:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/clever-vpn/clever-vpn-server/main/install.sh | bash -s -- v2.1.4 <token>
+```json
+POST /api/nodes
+{
+  "adminToken": "cva_xxxxxxxx",
+  "name": "tokyo",
+  "sshHost": "1.2.3.4",
+  "sshPassword": "..."
+}
 ```
 
-This is equivalent to the common interactive form based on `bash -c "$(curl -L ...)" @ <version> <token>`, but is easier to quote safely inside automation.
-
-## Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `LXD_SOCKET` | `/var/snap/lxd/common/lxd/unix.socket` | LXD Unix socket path |
-| `LXC_BASE_IMAGE` | `clever-vpn-base` | Base image alias |
-| `LXC_NETWORK` | `vpnbr0` | Container network bridge |
-| `LXC_NAME_PREFIX` | `user-` | Container name prefix |
-| `PORT` | `8080` | HTTP listen port |
-| `VPN_INSTALL_SCRIPT_URL` | `https://raw.githubusercontent.com/clever-vpn/clever-vpn-server/main/install.sh` | Default install script URL when `installScriptUrl` is omitted |
-
-## Container Plans
+## 容器规格
 
 | Plan | CPU | Memory |
 |------|-----|--------|
@@ -87,113 +107,120 @@ This is equivalent to the common interactive form based on `bash -c "$(curl -L .
 | basic | 1 | 1 GB |
 | pro | 2 | 2 GB |
 
-## Architecture
+## 端口分配
+
+| 池 | 范围 | 协议 |
+|----|------|------|
+| SSH | 22000–22999 | TCP |
+| Service | 50000–54999 | TCP+UDP |
+
+## 架构
 
 ```
-┌─ Host (Ubuntu 22.04+) ──────────────────────────────────┐
-│                                                           │
-│  clever-vpn-lxc (Go, :8080)                              │
-│  ├─ POST /api/containers  →  official LXD client + cloud-init │
-│  ├─ GET  /api/containers  →  official LXD client         │
-│  └─ ...                                                  │
-│                                                           │
-│  LXD (API via Unix socket)                               │
-│  ├─ clever-vpn-base (image)                              │
-│  ├─ user-101: 10.0.1.10                                  │
-│  ├─ user-102: 10.0.1.11                                  │
-│  └─ ...                                                  │
-│                                                           │
-│  cloud-init: password/key/install metadata               │
-│  iptables DNAT: 公网:ext → user-{id}:{port}              │
-└───────────────────────────────────────────────────────────┘
+┌─ Manager ────────────────────────────────────────┐
+│  lxc-manager serve --domain api.example.com      │
+│  :443 (autocert Let's Encrypt)                   │
+│  :80  (HTTP→HTTPS redirect + ACME)               │
+│  token auth (admin/user)                         │
+└──────┬───────────────────────────────────────────┘
+       │ HTTPS + client.crt (InsecureSkipVerify)
+┌──────▼──────┐  ┌──────────┐  ┌──────────┐
+│ Node tokyo  │  │ Node osaka│  │ Node ... │
+│ LXD :8443   │  │ LXD :8443 │  │          │
+│ vpnbr0      │  │ vpnbr0    │  │          │
+│ clever-vpn- │  │ clever-   │  │          │
+│ base image  │  │ vpn-base  │  │          │
+└─────────────┘  └──────────┘  └──────────┘
 ```
 
-## Host Requirements
+## 环境变量
 
-The host must be configured for LXC containers to run eBPF programs and WireGuard:
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `DATA_DIR` | `/var/lib/clever-vpn-lxc` | 数据目录 |
+| `LXD_CLIENT_CERT` | `client.crt` | LXD 客户端证书路径 |
+| `LXD_CLIENT_KEY` | `client.key` | LXD 客户端私钥路径 |
+| `LXD_URL` | `https://127.0.0.1:8443` | 默认 LXD 地址 |
+| `LXC_BASE_IMAGE` | `clever-vpn-base` | 基础镜像别名 |
+| `LXC_NETWORK` | `vpnbr0` | 容器网桥 |
+| `LXC_NAME_PREFIX` | `user-` | 容器名前缀 |
 
-| Requirement | Config | Auto-set by |
-|-------------|--------|-------------|
-| WireGuard kernel module | `/etc/modules-load.d/clever-vpn.conf` | `setup-lxc-host.sh` |
-| Unprivileged BPF | `kernel.unprivileged_bpf_disabled=0` in `/etc/sysctl.d/99-bpf.conf` | `setup-lxc-host.sh` |
+## 数据文件
 
-### Container Security Settings
-
-Every container is created with these configs automatically:
-
-| Config | Purpose |
-|--------|---------|
-| `security.nesting=true` | Allow eBPF syscalls in the container |
-| `security.privileged=true` | Required for BTF loading (`BPF_BTF_GET_FD_BY_ID` needs `CAP_SYS_ADMIN`) |
-| `limits.kernel.memlock=unlimited` | Allow eBPF programs to lock required memory |
-
-Without these, `clever-vpn-server` will fail with memlock / BTF errors.
-
-## Port Pools
-
-Two non-overlapping port pools are used for NAT forwarding:
-
-| Pool | Range | Protocol | Reason |
-|------|-------|----------|--------|
-| SSH | `22000-22999` | TCP only | TCP is not restricted; 22xxx is intuitive |
-| Service | `50000-54999` | TCP+UDP | >30000 avoids UDP blocking on some ISPs |
-
-Ports are allocated from pools at container creation, persisted to `/var/lib/clever-vpn-lxc/instances.json`, and remain bound to the container until deletion.
-
-## LXC 基本管理命令
-
-```bash
-# === 容器生命周期 ===
-lxc list                                    # 列出所有容器
-lxc info <name>                             # 容器详情（IP、CPU、内存）
-lxc start <name>                            # 启动
-lxc stop <name>                             # 停止
-lxc restart <name>                          # 重启
-lxc delete <name>                           # 删除（需先停止）
-
-# === 创建容器 ===
-lxc init <image> <name>                     # 从镜像创建（不启动）
-lxc launch <image> <name>                   # 创建并启动
-lxc launch images:debian/12/cloud test      # 从官方镜像创建
-
-# === 资源配置 ===
-lxc config set <name> limits.cpu 2          # 2 CPU
-lxc config set <name> limits.memory 1024MB  # 1GB 内存
-lxc config show <name>                      # 查看配置
-
-# === 网络 ===
-lxc network list                            # 列出网络
-lxc network show vpnbr0                     # 网络详情
-lxc config device add <name> eth0 nic nictype=bridged parent=vpnbr0
-
-# === 镜像管理 ===
-lxc image list                              # 本地镜像
-lxc image list images: debian               # 远程 Debian 镜像
-lxc publish <container> --alias <name>      # 容器发布为镜像
-lxc image delete <alias>                    # 删除镜像
-
-# === 进入容器 ===
-lxc exec <name> -- bash                     # 交互 shell
-lxc exec <name> -- systemctl status         # 执行命令
-
-# === 文件操作 ===
-lxc file pull <name>/path /local/path       # 从容器拉文件
-lxc file push /local/path <name>/path       # 推文件到容器
-
-# === 快照与恢复 ===
-lxc snapshot <name> <snap-name>             # 创建快照
-lxc restore <name> <snap-name>              # 从快照恢复
-lxc info <name>                             # 查看快照列表
-
-# === 端口转发（宿主机上执行）===
-VIP=$(lxc info <name> | awk '/eth0.*inet /{print $3}')
-iptables -t nat -A PREROUTING -p tcp --dport 10001 -j DNAT --to $VIP:443
-iptables -t nat -A PREROUTING -p udp --dport 10001 -j DNAT --to $VIP:443
-iptables -t nat -A OUTPUT -p tcp --dport 10001 -j DNAT --to $VIP:443
-iptables -t nat -A OUTPUT -p udp --dport 10001 -j DNAT --to $VIP:443
-iptables-save > /etc/iptables/rules.v4
 ```
+/var/lib/clever-vpn-lxc/
+├── tokens.json        ← 用户 token
+├── admin-tokens.json  ← 管理员 token
+├── nodes.json         ← 节点注册表
+├── instances.json     ← 容器实例注册表
+└── certs/
+    ├── acme_account+key
+    └── your-domain.com
+```
+
+## 容器安全设置
+
+每个容器自动应用：
+
+| 配置 | 值 | 原因 |
+|------|-----|------|
+| `security.nesting` | `true` | 允许容器内加载 eBPF |
+| `security.privileged` | `true` | BTF 需要 CAP_SYS_ADMIN |
+| `limits.kernel.memlock` | `unlimited` | eBPF 内存锁定 |
+
+## 节点要求
+
+- Ubuntu 22.04+
+- Kernel ≥ 5.4
+- WireGuard 内核模块
+- `kernel.unprivileged_bpf_disabled=0`
+
+节点供给脚本已嵌入二进制，SSH 后自动执行。
+
+
+端口在容器创建时从池中分配，持久化到 `/var/lib/clever-vpn-lxc/instances.json`，容器删除前一直绑定。
 
 ## GitHub Actions
 
-Pushes `clever-vpn-base` Docker image to `ghcr.io/clever-vpn/clever-vpn-lxc`.
+### 发布二进制
+
+手动触发 `.github/workflows/release.yml`：
+
+- **输入版本号**：检查 tag 不存在 → 构建 amd64/arm64 → 打 tag → 发布到 GitHub Releases
+- **留空自动升降**：取最新 tag 的 patch 位 +1 作为新版本
+
+构建时通过 ldflags 注入版本号：`-ldflags "-X main.version=v1.2.3"`
+
+## R2 数据备份
+
+配置文件中启用后，`serve` 自动定时备份。也可以手动执行：
+
+```bash
+# 手动备份/恢复
+lxc-manager backup --config /etc/lxc-manager/config.json
+lxc-manager restore --config /etc/lxc-manager/config.json
+```
+
+### 配置文件 `/etc/lxc-manager/config.json`
+
+```json
+{
+  "domain": "lxc-api.clever-clouds.com",
+  "port": "443",
+  "lxd_client_cert": "/etc/lxc-manager/client.crt",
+  "lxd_client_key": "/etc/lxc-manager/client.key",
+  "backup": {
+    "enabled": true,
+    "interval": "1h",
+    "r2_endpoint": "https://<account-id>.r2.cloudflarestorage.com",
+    "r2_bucket": "clever-vpn-lxc-backup",
+    "r2_access_key_id": "$R2_ACCESS_KEY_ID",
+    "r2_secret_access_key": "$R2_SECRET_ACCESS_KEY"
+  }
+}
+```
+
+- CLI 参数 `--domain` `--port` 等覆盖配置文件对应字段
+- `$VAR` 语法从环境变量读取（避免密钥明文写入配置文件）
+- 备份排除 `certs/` 目录
+
