@@ -81,21 +81,13 @@ jobs:
 
       - name: Terraform Init
         env:
-          R2_ACCOUNT_ID: ${{ env.R2_ACCOUNT_ID }}
-          R2_ACCESS_KEY_ID: ${{ env.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ env.R2_SECRET_ACCESS_KEY }}
+          TF_BACKEND_R2_ACCOUNT_ID: ${{ env.R2_ACCOUNT_ID }}
+          TF_BACKEND_R2_ACCESS_KEY_ID: ${{ env.R2_ACCESS_KEY_ID }}
+          TF_BACKEND_R2_SECRET_ACCESS_KEY: ${{ env.R2_SECRET_ACCESS_KEY }}
         run: |
+          envsubst < deploy/backends/prod.r2.hcl > /tmp/backend.hcl
           terraform -chdir=deploy/terraform init \
-            -backend-config="endpoints={s3=\"https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com\"}" \
-            -backend-config="bucket=tfstate" \
-            -backend-config="key=clever-vpn-lxc/infra.tfstate" \
-            -backend-config="region=auto" \
-            -backend-config="access_key=${R2_ACCESS_KEY_ID}" \
-            -backend-config="secret_key=${R2_SECRET_ACCESS_KEY}" \
-            -backend-config="skip_credentials_validation=true" \
-            -backend-config="skip_region_validation=true" \
-            -backend-config="skip_requesting_account_id=true" \
-            -backend-config="skip_s3_checksum=true" \
+            -backend-config=/tmp/backend.hcl \
             -reconfigure
 
       - name: Terraform Plan (deploy)
