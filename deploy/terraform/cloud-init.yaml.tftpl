@@ -73,19 +73,13 @@ runcmd:
   - |
     set -e
     mkdir -p /etc/lxc-manager /var/lib/clever-vpn-lxc
-
     lxc-manager cert gen /etc/lxc-manager
-
     lxc-manager install --config /etc/lxc-manager/config.json --domain ${fqdn}
 
   # Set LXD client cert/key env vars in systemd override
   - |
     mkdir -p /etc/systemd/system/lxc-manager.service.d
-    cat > /etc/systemd/system/lxc-manager.service.d/override.conf <<'EOF'
-[Service]
-Environment="LXD_CLIENT_CERT=/etc/lxc-manager/client.crt"
-Environment="LXD_CLIENT_KEY=/etc/lxc-manager/client.key"
-EOF
+    printf '[Service]\nEnvironment="LXD_CLIENT_CERT=/etc/lxc-manager/client.crt"\nEnvironment="LXD_CLIENT_KEY=/etc/lxc-manager/client.key"\n' > /etc/systemd/system/lxc-manager.service.d/override.conf
     systemctl daemon-reload
     systemctl restart lxc-manager
 
