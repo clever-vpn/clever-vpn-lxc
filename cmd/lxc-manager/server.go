@@ -54,7 +54,9 @@ type ResizeReq struct {
 	Mem  int `json:"mem"`
 	Disk int `json:"disk"`
 }
-type APIError struct{ Error string `json:"error"` }
+type APIError struct {
+	Error string `json:"error"`
+}
 
 // ==================== Instance Registry ====================
 
@@ -73,11 +75,11 @@ type InstanceRecord struct {
 }
 
 var (
-	instFile string
-	instMu   sync.Mutex
-	instances  = map[string]*InstanceRecord{}
-	usedSSH    = map[int]bool{}
-	usedSvc    = map[int]bool{}
+	instFile  string
+	instMu    sync.Mutex
+	instances = map[string]*InstanceRecord{}
+	usedSSH   = map[int]bool{}
+	usedSvc   = map[int]bool{}
 )
 
 const (
@@ -91,7 +93,9 @@ func loadInstances() {
 	instFile = filepathJoin(ensureDataDir(), "instances.json")
 	data, err := os.ReadFile(instFile)
 	if err != nil {
-		if os.IsNotExist(err) { return }
+		if os.IsNotExist(err) {
+			return
+		}
 		log.Fatalf("read instances: %v", err)
 	}
 	if err := json.Unmarshal(data, &instances); err != nil {
@@ -111,7 +115,10 @@ func saveInstances() {
 
 func allocPortLocked(base, max int, used map[int]bool) (int, error) {
 	for p := base; p <= max; p++ {
-		if !used[p] { used[p] = true; return p, nil }
+		if !used[p] {
+			used[p] = true
+			return p, nil
+		}
 	}
 	return 0, fmt.Errorf("no free port %d-%d", base, max)
 }
@@ -124,9 +131,14 @@ func registerInstance(name string, rec *InstanceRecord) error {
 		return fmt.Errorf("instance %s already registered", name)
 	}
 	ssh, err := allocPortLocked(sshPortBase, sshPortMax, usedSSH)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	svc, err := allocPortLocked(servicePortBase, servicePortMax, usedSvc)
-	if err != nil { usedSSH[ssh] = false; return err }
+	if err != nil {
+		usedSSH[ssh] = false
+		return err
+	}
 
 	rec.SSHExtPort = ssh
 	rec.ServiceExtPort = svc
@@ -156,7 +168,9 @@ func addPortForward(extPort int, ip string, intPort int) error {
 			c := exec.Command("iptables", "-t", "nat", "-C", chain,
 				"-p", proto, "--dport", strconv.Itoa(extPort),
 				"-j", "DNAT", "--to", fmt.Sprintf("%s:%d", ip, intPort))
-			if c.Run() == nil { continue }
+			if c.Run() == nil {
+				continue
+			}
 			a := exec.Command("iptables", "-t", "nat", "-A", chain,
 				"-p", proto, "--dport", strconv.Itoa(extPort),
 				"-j", "DNAT", "--to", fmt.Sprintf("%s:%d", ip, intPort))
@@ -192,7 +206,9 @@ func jsonOK(w http.ResponseWriter, v interface{}) {
 }
 
 func env(k, def string) string {
-	if v := os.Getenv(k); v != "" { return v }
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
 	return def
 }
 
@@ -308,13 +324,26 @@ func recoverInstances() {
 
 func handleCreate(w http.ResponseWriter, r *http.Request) {
 	ok, userID := validateUser(r)
-	if !ok { jsonError(w, "unauthorized", 401); return }
+	if !ok {
+		jsonError(w, "unauthorized", 401)
+		return
+	}
 
 	var req CreateReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil { jsonError(w, "invalid body", 400); return }
-	if req.ServicePort <= 0 || req.ServicePort > 65535 { jsonError(w, "servicePort required (1-65535)", 400); return }
-	if req.CPU <= 0 { req.CPU = 1 }
-	if req.Mem <= 0 { req.Mem = 512 }
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid body", 400)
+		return
+	}
+	if req.ServicePort <= 0 || req.ServicePort > 65535 {
+		jsonError(w, "servicePort required (1-65535)", 400)
+		return
+	}
+	if req.CPU <= 0 {
+		req.CPU = 1
+	}
+	if req.Mem <= 0 {
+		req.Mem = 512
+	}
 
 	var cli *lxc.Client
 	var nodeID string
@@ -400,7 +429,9 @@ func handleCreate(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Ports: ssh=%d, svc=%d -> %s", ports.SSH, ports.Service, vip)
 
 	resp := CreateResp{Status: "creating", Name: name, Ports: ports, CPU: req.CPU, Mem: req.Mem, Disk: req.Disk, NodeID: nodeID}
-	if password != "" { resp.Password = password }
+	if password != "" {
+		resp.Password = password
+	}
 	jsonOK(w, resp)
 }
 
@@ -409,7 +440,9 @@ func clientForInstance(name string) *lxc.Client {
 	rec, ok := instances[name]
 	instMu.Unlock()
 	if ok && rec.Node != "" {
-		if c, err := getNodeClient(rec.Node); err == nil { return c }
+		if c, err := getNodeClient(rec.Node); err == nil {
+			return c
+		}
 		log.Printf("WARNING: node %s unreachable, falling back to default", rec.Node)
 	}
 	return lxdClient
@@ -417,7 +450,10 @@ func clientForInstance(name string) *lxc.Client {
 
 func handleList(w http.ResponseWriter, r *http.Request) {
 	ok, userID := validateUser(r)
-	if !ok { jsonError(w, "unauthorized", 401); return }
+	if !ok {
+		jsonError(w, "unauthorized", 401)
+		return
+	}
 
 	instMu.Lock()
 	var mine []string
@@ -439,11 +475,16 @@ func handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cli := lxdClient
-	for _, c := range pool { cli = c; break }
+	for _, c := range pool {
+		cli = c
+		break
+	}
 	all, _ := cli.ListContainers(env("LXC_NAME_PREFIX", "user-"))
 
 	ownedSet := map[string]bool{}
-	for _, n := range mine { ownedSet[n] = true }
+	for _, n := range mine {
+		ownedSet[n] = true
+	}
 
 	var result []lxc.Container
 	for _, c := range all {
@@ -456,10 +497,16 @@ func handleList(w http.ResponseWriter, r *http.Request) {
 
 func handleGet(w http.ResponseWriter, r *http.Request) {
 	name := stripPrefix(r.URL.Path, "/api/containers/")
-	if name == "" { jsonError(w, "name required", 400); return }
+	if name == "" {
+		jsonError(w, "name required", 400)
+		return
+	}
 
 	ok, userID := validateUser(r)
-	if !ok { jsonError(w, "unauthorized", 401); return }
+	if !ok {
+		jsonError(w, "unauthorized", 401)
+		return
+	}
 
 	instMu.Lock()
 	rec, exists := instances[name]
@@ -470,7 +517,10 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	c, err := clientForInstance(name).GetContainer(name)
-	if err != nil { jsonError(w, fmt.Sprintf("get: %v", err), 404); return }
+	if err != nil {
+		jsonError(w, fmt.Sprintf("get: %v", err), 404)
+		return
+	}
 	jsonOK(w, c)
 }
 
@@ -478,7 +528,10 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 	name := stripPrefix(r.URL.Path, "/api/containers/")
 
 	ok, userID := validateUser(r)
-	if !ok { jsonError(w, "unauthorized", 401); return }
+	if !ok {
+		jsonError(w, "unauthorized", 401)
+		return
+	}
 
 	instMu.Lock()
 	rec, exists := instances[name]
@@ -490,7 +543,10 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 
 	cli := clientForInstance(name)
 	container, err := cli.GetContainer(name)
-	if err != nil { jsonError(w, fmt.Sprintf("get: %v", err), 404); return }
+	if err != nil {
+		jsonError(w, fmt.Sprintf("get: %v", err), 404)
+		return
+	}
 
 	vip, _ := cli.InstanceIPv4(name, 5*time.Second)
 	if vip != "" {
@@ -500,9 +556,15 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 	unregisterInstance(name)
 
 	if !strings.EqualFold(container.Status, "Stopped") {
-		if err := cli.StopContainer(name); err != nil { jsonError(w, fmt.Sprintf("stop: %v", err), 500); return }
+		if err := cli.StopContainer(name); err != nil {
+			jsonError(w, fmt.Sprintf("stop: %v", err), 500)
+			return
+		}
 	}
-	if err := cli.DeleteContainer(name); err != nil { jsonError(w, fmt.Sprintf("delete: %v", err), 500); return }
+	if err := cli.DeleteContainer(name); err != nil {
+		jsonError(w, fmt.Sprintf("delete: %v", err), 500)
+		return
+	}
 	jsonOK(w, map[string]string{"status": "deleted"})
 }
 
@@ -510,11 +572,20 @@ func handleResize(w http.ResponseWriter, r *http.Request) {
 	name := stripPrefix(strings.TrimSuffix(r.URL.Path, "/resize"), "/api/containers/")
 
 	ok, userID := validateUser(r)
-	if !ok { jsonError(w, "unauthorized", 401); return }
+	if !ok {
+		jsonError(w, "unauthorized", 401)
+		return
+	}
 
 	var req ResizeReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil { jsonError(w, "invalid body", 400); return }
-	if req.CPU <= 0 && req.Mem <= 0 && req.Disk <= 0 { jsonError(w, "cpu, mem, or disk required", 400); return }
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid body", 400)
+		return
+	}
+	if req.CPU <= 0 && req.Mem <= 0 && req.Disk <= 0 {
+		jsonError(w, "cpu, mem, or disk required", 400)
+		return
+	}
 
 	instMu.Lock()
 	rec, exists := instances[name]
@@ -523,13 +594,22 @@ func handleResize(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "not found", 404)
 		return
 	}
-	if req.CPU > 0 { rec.CPU = req.CPU }
-	if req.Mem > 0 { rec.Mem = req.Mem }
-	if req.Disk > 0 { rec.Disk = req.Disk }
+	if req.CPU > 0 {
+		rec.CPU = req.CPU
+	}
+	if req.Mem > 0 {
+		rec.Mem = req.Mem
+	}
+	if req.Disk > 0 {
+		rec.Disk = req.Disk
+	}
 	saveInstances()
 	instMu.Unlock()
 
-	if err := clientForInstance(name).ResizeContainer(name, rec.CPU, rec.Mem, rec.Disk); err != nil { jsonError(w, fmt.Sprintf("resize: %v", err), 500); return }
+	if err := clientForInstance(name).ResizeContainer(name, rec.CPU, rec.Mem, rec.Disk); err != nil {
+		jsonError(w, fmt.Sprintf("resize: %v", err), 500)
+		return
+	}
 	jsonOK(w, map[string]interface{}{"status": "resized", "cpu": rec.CPU, "mem": rec.Mem, "disk": rec.Disk})
 }
 
@@ -544,20 +624,26 @@ func handleNodeAdd(w http.ResponseWriter, r *http.Request) {
 		SSHPassword string `json:"sshPassword"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonError(w, "invalid body", 400); return
+		jsonError(w, "invalid body", 400)
+		return
 	}
 	if req.Name == "" || req.Region == "" || req.SSHHost == "" || req.SSHPassword == "" {
-		jsonError(w, "name, region, sshHost, sshPassword required", 400); return
+		jsonError(w, "name, region, sshHost, sshPassword required", 400)
+		return
 	}
-	if req.SSHPort == 0 { req.SSHPort = 22 }
+	if req.SSHPort == 0 {
+		req.SSHPort = 22
+	}
 
 	rec, err := provisionNode(req.Name, req.Region, req.SSHHost, req.SSHPort, req.SSHPassword)
 	if err != nil {
-		jsonError(w, fmt.Sprintf("provision: %v", err), 500); return
+		jsonError(w, fmt.Sprintf("provision: %v", err), 500)
+		return
 	}
 
 	if err := addNode(rec); err != nil {
-		jsonError(w, fmt.Sprintf("register node: %v", err), 500); return
+		jsonError(w, fmt.Sprintf("register node: %v", err), 500)
+		return
 	}
 
 	log.Printf("Node %s ready: %s (region=%s)", rec.Name, rec.URL, rec.Region)
@@ -576,15 +662,24 @@ func handleNodeList(w http.ResponseWriter, r *http.Request) {
 
 func handleNodeDelete(w http.ResponseWriter, r *http.Request) {
 	nodeID := stripPrefix(r.URL.Path, "/api/nodes/")
-	if nodeID == "" { jsonError(w, "node id required", 400); return }
-	if err := removeNode(nodeID); err != nil { jsonError(w, err.Error(), 404); return }
+	if nodeID == "" {
+		jsonError(w, "node id required", 400)
+		return
+	}
+	if err := removeNode(nodeID); err != nil {
+		jsonError(w, err.Error(), 404)
+		return
+	}
 	log.Printf("Node %s removed", nodeID)
 	jsonOK(w, map[string]string{"status": "removed", "nodeID": nodeID})
 }
 
 func handleNodeContainers(w http.ResponseWriter, r *http.Request) {
 	nodeID := stripPrefix(strings.TrimSuffix(r.URL.Path, "/containers"), "/api/nodes/")
-	if nodeID == "" { jsonError(w, "node id required", 400); return }
+	if nodeID == "" {
+		jsonError(w, "node id required", 400)
+		return
+	}
 
 	instMu.Lock()
 	var result []map[string]interface{}
@@ -605,12 +700,18 @@ func handleNodeContainers(w http.ResponseWriter, r *http.Request) {
 // ==================== User Handlers ====================
 
 func handleUserCreate(w http.ResponseWriter, r *http.Request) {
-	var req struct{ Name string `json:"name"` }
+	var req struct {
+		Name string `json:"name"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
-		jsonError(w, "name required", 400); return
+		jsonError(w, "name required", 400)
+		return
 	}
 	userID, token, err := addUser(req.Name)
-	if err != nil { jsonError(w, err.Error(), 409); return }
+	if err != nil {
+		jsonError(w, err.Error(), 409)
+		return
+	}
 	log.Printf("User created: %s (%s)", req.Name, userID)
 	jsonOK(w, map[string]string{"userID": userID, "name": req.Name, "token": token})
 }
@@ -621,14 +722,23 @@ func handleUserList(w http.ResponseWriter, r *http.Request) {
 
 func handleUserDelete(w http.ResponseWriter, r *http.Request) {
 	userID := stripPrefix(r.URL.Path, "/api/users/")
-	if userID == "" { jsonError(w, "user id required", 400); return }
-	if err := deleteUser(userID); err != nil { jsonError(w, err.Error(), 404); return }
+	if userID == "" {
+		jsonError(w, "user id required", 400)
+		return
+	}
+	if err := deleteUser(userID); err != nil {
+		jsonError(w, err.Error(), 404)
+		return
+	}
 	jsonOK(w, map[string]string{"status": "deleted", "userID": userID})
 }
 
 func handleUserResetToken(w http.ResponseWriter, r *http.Request) {
 	userID := stripPrefix(strings.TrimSuffix(r.URL.Path, "/token"), "/api/users/")
-	if userID == "" { jsonError(w, "user id required", 400); return }
+	if userID == "" {
+		jsonError(w, "user id required", 400)
+		return
+	}
 
 	// Support name lookup for convenience
 	if resolved := resolveUserID(userID); resolved != "" {
@@ -636,7 +746,10 @@ func handleUserResetToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	token, err := regenerateUserToken(userID)
-	if err != nil { jsonError(w, err.Error(), 404); return }
+	if err != nil {
+		jsonError(w, err.Error(), 404)
+		return
+	}
 
 	rec, _ := getUserByID(userID)
 	log.Printf("User token reset: %s (%s)", rec.Name, userID)
@@ -645,19 +758,26 @@ func handleUserResetToken(w http.ResponseWriter, r *http.Request) {
 
 func handleUserRename(w http.ResponseWriter, r *http.Request) {
 	userID := stripPrefix(strings.TrimSuffix(r.URL.Path, "/name"), "/api/users/")
-	if userID == "" { jsonError(w, "user id required", 400); return }
+	if userID == "" {
+		jsonError(w, "user id required", 400)
+		return
+	}
 
 	if resolved := resolveUserID(userID); resolved != "" {
 		userID = resolved
 	}
 
-	var req struct{ Name string `json:"name"` }
+	var req struct {
+		Name string `json:"name"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
-		jsonError(w, "name required", 400); return
+		jsonError(w, "name required", 400)
+		return
 	}
 
 	if err := updateUserName(userID, req.Name); err != nil {
-		jsonError(w, err.Error(), 400); return
+		jsonError(w, err.Error(), 400)
+		return
 	}
 	rec, _ := getUserByID(userID)
 	jsonOK(w, map[string]string{"userID": rec.ID, "name": rec.Name})
@@ -698,7 +818,9 @@ func destroyContainer(name string) {
 // ==================== HTTP Router ====================
 
 func handleAdminLogin(w http.ResponseWriter, r *http.Request) {
-	var req struct{ Password string `json:"password"` }
+	var req struct {
+		Password string `json:"password"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Password == "" {
 		jsonError(w, "password required", 400)
 		return
@@ -740,38 +862,67 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, map[string]string{"status": "ok"})
 	// Nodes (admin auth)
 	case p == "/api/nodes" && r.Method == "POST":
-		if !validateAdmin(r) { jsonError(w, "unauthorized", 401); return }
+		if !validateAdmin(r) {
+			jsonError(w, "unauthorized", 401)
+			return
+		}
 		handleNodeAdd(w, r)
 	case p == "/api/nodes" && r.Method == "GET":
-		if !validateAdmin(r) { jsonError(w, "unauthorized", 401); return }
+		if !validateAdmin(r) {
+			jsonError(w, "unauthorized", 401)
+			return
+		}
 		handleNodeList(w, r)
 	case strings.HasPrefix(p, "/api/nodes/") && strings.HasSuffix(p, "/containers") && r.Method == "GET":
-		if !validateAdmin(r) { jsonError(w, "unauthorized", 401); return }
+		if !validateAdmin(r) {
+			jsonError(w, "unauthorized", 401)
+			return
+		}
 		handleNodeContainers(w, r)
 	case strings.HasPrefix(p, "/api/nodes/") && r.Method == "DELETE":
 		if strings.HasSuffix(p, "/containers") {
-			jsonError(w, "not found", 404); return
+			jsonError(w, "not found", 404)
+			return
 		}
-		if !validateAdmin(r) { jsonError(w, "unauthorized", 401); return }
+		if !validateAdmin(r) {
+			jsonError(w, "unauthorized", 401)
+			return
+		}
 		handleNodeDelete(w, r)
 	// Users (admin auth)
 	case p == "/api/users" && r.Method == "POST":
-		if !validateAdmin(r) { jsonError(w, "unauthorized", 401); return }
+		if !validateAdmin(r) {
+			jsonError(w, "unauthorized", 401)
+			return
+		}
 		handleUserCreate(w, r)
 	case p == "/api/users" && r.Method == "GET":
-		if !validateAdmin(r) { jsonError(w, "unauthorized", 401); return }
+		if !validateAdmin(r) {
+			jsonError(w, "unauthorized", 401)
+			return
+		}
 		handleUserList(w, r)
 	case strings.HasPrefix(p, "/api/users/") && r.Method == "DELETE":
 		if strings.HasSuffix(p, "/token") || strings.HasSuffix(p, "/name") {
-			jsonError(w, "not found", 404); return
+			jsonError(w, "not found", 404)
+			return
 		}
-		if !validateAdmin(r) { jsonError(w, "unauthorized", 401); return }
+		if !validateAdmin(r) {
+			jsonError(w, "unauthorized", 401)
+			return
+		}
 		handleUserDelete(w, r)
 	case strings.HasPrefix(p, "/api/users/") && strings.HasSuffix(p, "/token") && r.Method == "PUT":
-		if !validateAdmin(r) { jsonError(w, "unauthorized", 401); return }
+		if !validateAdmin(r) {
+			jsonError(w, "unauthorized", 401)
+			return
+		}
 		handleUserResetToken(w, r)
 	case strings.HasPrefix(p, "/api/users/") && strings.HasSuffix(p, "/name") && r.Method == "PUT":
-		if !validateAdmin(r) { jsonError(w, "unauthorized", 401); return }
+		if !validateAdmin(r) {
+			jsonError(w, "unauthorized", 401)
+			return
+		}
 		handleUserRename(w, r)
 	// Containers (user auth, scoped by token)
 	case p == "/api/containers" && r.Method == "POST":
@@ -884,7 +1035,9 @@ func generateUUID() string {
 
 func genPasswd() string {
 	out, err := exec.Command("openssl", "rand", "-base64", "12").Output()
-	if err == nil { return strings.TrimSpace(string(out)) }
+	if err == nil {
+		return strings.TrimSpace(string(out))
+	}
 	return generateToken("")[:16]
 }
 
@@ -893,7 +1046,9 @@ func envLine(k, v string) string { return k + "=" + shellQuote(v) }
 
 func indent(s, prefix string) string {
 	lines := strings.Split(strings.TrimSuffix(s, "\n"), "\n")
-	for i, l := range lines { lines[i] = prefix + l }
+	for i, l := range lines {
+		lines[i] = prefix + l
+	}
 	return strings.Join(lines, "\n")
 }
 
