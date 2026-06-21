@@ -38,7 +38,13 @@ write_files:
     content: ${admin_password_hash}
 
 runcmd:
-  # Download and install lxc-manager binary
+  # ============ Phase 1: Infrastructure (always, no dependencies) ============
+  - ufw allow 22/tcp
+  - ufw allow 80/tcp
+  - ufw allow 443/tcp
+  - ufw --force enable
+
+  # ============ Phase 2: Download binary (retry, abort on final failure) ============
   - |
     set -e
     ARCH=$(uname -m)
@@ -54,13 +60,24 @@ runcmd:
     SHA="$ASSET.sha256"
 
     cd /tmp
-    curl -fLO "$BASE/$SHA"
-    curl -fLO "$BASE/$ASSET"
+    for i in 1 2 3; do
+      if curl -fsSLo "$SHA" "$BASE/$SHA" && curl -fsSLo "$ASSET" "$BASE/$ASSET"; then
+        echo "Download succeeded on attempt $i"
+        break
+      fi
+      echo "Download attempt $i failed, retrying in 10s..."
+      sleep 10
+    done
+
+    if [ ! -f "$ASSET" ] || [ ! -f "$SHA" ]; then
+      echo "ERROR: download failed after 3 attempts"
+      exit 1
+    fi
 
     EXPECTED=$(awk '{print $1}' "$SHA")
     ACTUAL=$(sha256sum "$ASSET" | awk '{print $1}')
     if [ "$EXPECTED" != "$ACTUAL" ]; then
-      echo "checksum mismatch"
+      echo "ERROR: checksum mismatch"
       exit 1
     fi
 
@@ -68,26 +85,20 @@ runcmd:
     BIN="lxc-manager-$GOARCH-$TAG"
     chmod +x "$BIN"
     mv "$BIN" /usr/local/bin/lxc-manager
+    echo "lxc-manager installed successfully"
 
-  # Generate LXD client cert and install service
+  # ============ Phase 3: Application setup (depends on Phase 2) ============
   - |
     set -e
     mkdir -p /etc/lxc-manager /var/lib/clever-vpn-lxc
     lxc-manager cert gen /etc/lxc-manager
     lxc-manager install --config /etc/lxc-manager/config.json --domain ${fqdn}
 
-  # Set LXD client cert/key env vars in systemd override
-  - |
     mkdir -p /etc/systemd/system/lxc-manager.service.d
     printf '[Service]\nEnvironment="LXD_CLIENT_CERT=/etc/lxc-manager/client.crt"\nEnvironment="LXD_CLIENT_KEY=/etc/lxc-manager/client.key"\n' > /etc/systemd/system/lxc-manager.service.d/override.conf
     systemctl daemon-reload
     systemctl restart lxc-manager
-
-  # Firewall
-  - ufw allow 22/tcp
-  - ufw allow 80/tcp
-  - ufw allow 443/tcp
-  - ufw --force enable
+    echo "lxc-manager service started"
 
 users:
   - name: root

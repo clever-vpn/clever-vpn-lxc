@@ -34,8 +34,8 @@ lxc-manager install --domain your-domain.com
 | `lxc-manager uninstall` | 卸载 systemd 服务 |
 | `lxc-manager cert gen` | 生成 client.crt + client.key |
 | `lxc-manager admin create <name>` | 创建管理员 token（cva_ 前缀） |
-| `lxc-manager add-node <name> <host>` | SSH 供给新节点 |
-| `lxc-manager remove-node <name>` | 移除节点 |
+| `lxc-manager add-node <name> <host> <region>` | SSH 供给新节点到指定区域 |
+| `lxc-manager remove-node <id或name>` | 移除节点 |
 | `lxc-manager list-nodes` | 列出所有节点 |
 | `lxc-manager add-user <name>` | 创建用户（返回 userID + token） |
 | `lxc-manager remove-user <id或name>` | 删除用户（销毁其所有容器） |
@@ -58,7 +58,8 @@ lxc-manager install --domain your-domain.com
 | `POST` | `/api/admin/login` | 无 | 管理员登录（密码 → token） |
 | `POST` | `/api/nodes` | admin | 添加节点 |
 | `GET` | `/api/nodes` | admin | 列出节点 |
-| `DELETE` | `/api/nodes/:name` | admin | 删除节点 |
+| `GET` | `/api/nodes/:id/containers` | admin | 节点上所有容器 |
+| `DELETE` | `/api/nodes/:id` | admin | 删除节点 |
 | `POST` | `/api/users` | admin | 创建用户（返回 userID + name + token） |
 | `GET` | `/api/users` | admin | 列出用户（id / name / containers） |
 | `DELETE` | `/api/users/:id` | admin | 删除用户（销毁所有容器） |
@@ -85,7 +86,7 @@ POST /api/containers
   "mem": 512,
   "disk": 10,
   "servicePort": 443,
-  "node": "tokyo",
+  "nodeID": "nd_abc123",
   "userData": "#cloud-config\n..."
 }
 ```
@@ -97,7 +98,7 @@ POST /api/containers
 | `mem` | int | ❌ | 内存 (MB)，默认 512 |
 | `disk` | int | ❌ | 磁盘上限 (GB)，0 或不传 = 不受限 |
 | `servicePort` | int | ✅ | 容器内服务端口 (1-65535) |
-| `node` | string | ❌ | 指定节点名，空则自动分配 |
+| `region` | string | ❌ | 区域名，同区域多节点轮询分配 |
 | `userData` | string | ❌ | cloud-init 配置，空则自动设密码 |
 
 ```json
@@ -238,8 +239,10 @@ LXD 节点注册表，key 为节点名称。
 
 ```json
 {
-  "tokyo": {
-    "name": "tokyo",
+  "nd_abc123": {
+    "id": "nd_abc123",
+    "name": "tokyo-1",
+    "region": "tokyo",
     "url": "https://192.168.1.10:8443",
     "network": "vpnbr0",
     "sshHost": "192.168.1.10",
@@ -251,7 +254,9 @@ LXD 节点注册表，key 为节点名称。
 
 | 字段 | 说明 |
 |------|------|
-| `name` | 节点唯一名称 |
+| `id` | 不可变唯一标识 |
+| `name` | 人类可读名称，唯一 |
+| `region` | 地理位置（如 `tokyo`），多节点可共享 |
 | `url` | LXD HTTPS API 地址 |
 | `network` | 容器网桥名称 |
 | `sshHost` / `sshPort` | 供给时使用的 SSH 信息 |
@@ -273,7 +278,7 @@ LXD 节点注册表，key 为节点名称。
     "userID": "u_a1b2c3d4",
     "token": "cvl_abc123...",
     "password": "Ab3Xy9...",
-    "node": "tokyo",
+    "nodeID": "nd_abc123",
     "created": "2026-06-21T10:30:00Z"
   }
 }
@@ -290,7 +295,7 @@ LXD 节点注册表，key 为节点名称。
 | `userID` | 所属用户的不可变标识 |
 | `token` | 创建时使用的认证 token |
 | `password` | 容器 root 密码（自动生成时） |
-| `node` | 所在节点名（空表示本地） |
+| `nodeID` | 所在节点 ID（空表示本地） |
 | `created` | 创建时间 (UTC) |
 
 ## 容器安全设置

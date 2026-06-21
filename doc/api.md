@@ -63,7 +63,7 @@ Base URL: `https://<host>:<port>` (default port: `8080`, or `443` with autocert)
   "disk":        10,
   "servicePort": 8080,
   "userData":    "#cloud-config\n...",
-  "node":         "node-name"
+  "region":       "tokyo"
 }
 ```
 
@@ -74,8 +74,8 @@ Base URL: `https://<host>:<port>` (default port: `8080`, or `443` with autocert)
 | `mem` | int | ❌ | 内存限制 (MB)，默认 512 |
 | `disk` | int | ❌ | 磁盘上限 (GB)，0 或不传 = 不受限 |
 | `servicePort` | int | ✅ | 容器内服务端口 (1-65535) |
+| `region` | string | ❌ | 区域名（如 `tokyo`），同区域多节点轮询分配 |
 | `userData` | string | ❌ | cloud-init user-data；为空时自动生成密码 |
-| `node` | string | ❌ | 指定节点名称，为空则自动分配 |
 
 **响应** `200`：
 ```json
@@ -86,6 +86,7 @@ Base URL: `https://<host>:<port>` (default port: `8080`, or `443` with autocert)
   "cpu": 1,
   "mem": 512,
   "disk": 10,
+  "nodeID": "nd_abc123",
   "ports": {
     "ssh": 22001,
     "service": 50001
@@ -149,18 +150,29 @@ Base URL: `https://<host>:<port>` (default port: `8080`, or `443` with autocert)
 ```json
 {
   "adminToken":  "<admin-token>",
-  "name":        "node-1",
+  "name":        "tokyo-1",
+  "region":      "tokyo",
   "sshHost":     "192.168.1.10",
   "sshPort":     22,
   "sshPassword": "password"
 }
 ```
 
+| 字段 | 说明 |
+|------|------|
+| `name` | 人类可读名称，必须唯一 |
+| `region` | 地理位置（如 `tokyo`、`ewr`），可多个节点共享 |
+| `sshHost` | LXD 宿主机 IP |
+| `sshPort` | SSH 端口（默认 22） |
+| `sshPassword` | root 密码 |
+
 **响应** `200`：
 ```json
 {
   "status": "ready",
-  "name":   "node-1",
+  "id":     "nd_abc123",
+  "name":   "tokyo-1",
+  "region": "tokyo",
   "url":    "https://192.168.1.10:8443"
 }
 ```
@@ -171,7 +183,9 @@ Base URL: `https://<host>:<port>` (default port: `8080`, or `443` with autocert)
 ```json
 [
   {
-    "name":    "node-1",
+    "id":      "nd_abc123",
+    "name":    "tokyo-1",
+    "region":  "tokyo",
     "url":     "https://192.168.1.10:8443",
     "network": "vpnbr0",
     "sshHost": "192.168.1.10",
@@ -181,11 +195,25 @@ Base URL: `https://<host>:<port>` (default port: `8080`, or `443` with autocert)
 ]
 ```
 
-### `DELETE /api/nodes/{name}?adminToken=<token>` — 删除节点
+### `GET /api/nodes/{id}/containers?adminToken=<token>` — 查询节点上所有容器
 
 **响应** `200`：
 ```json
-{ "status": "removed" }
+[
+  {
+    "name":   "user-abc123",
+    "userID": "u_xyz",
+    "plan":   { "cpu": 1, "mem": 512, "disk": 10 },
+    "ports":  { "ssh": 22001, "service": 50001 }
+  }
+]
+```
+
+### `DELETE /api/nodes/{id}?adminToken=<token>` — 删除节点
+
+**响应** `200`：
+```json
+{ "status": "removed", "nodeID": "nd_abc123" }
 ```
 
 ### `POST /api/users` — 创建用户
