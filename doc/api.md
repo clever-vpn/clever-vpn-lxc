@@ -2,6 +2,8 @@
 
 Base URL: `https://<host>:<port>` (default port: `8080`, or `443` with autocert)
 
+所有需要认证的接口在 HTTP 头中传递：`Authorization: Bearer <token>`
+
 ---
 
 ## 公共接口（无需认证）
@@ -24,6 +26,15 @@ Base URL: `https://<host>:<port>` (default port: `8080`, or `443` with autocert)
 { "version": "v1.0.0" }
 ```
 
+### `GET /api/regions` — 可用区域列表
+
+返回当前有节点的区域，方便用户创建容器时选择。
+
+**响应** `200`：
+```json
+["tokyo", "ewr"]
+```
+
 ### `POST /api/admin/login` — 管理员登录
 
 部署时注入 bcrypt 哈希的管理员密码。登录成功后返回 admin token，用于后续所有管理接口。
@@ -35,7 +46,6 @@ Base URL: `https://<host>:<port>` (default port: `8080`, or `443` with autocert)
 
 **响应** `200`：
 ```json
-{ "adminToken": "cva_abc123..." }
 ```
 
 **错误** `401`：
@@ -50,14 +60,15 @@ Base URL: `https://<host>:<port>` (default port: `8080`, or `443` with autocert)
 
 ## 用户接口（User Token 认证）
 
-所有容器操作使用 `token` 字段认证。用户 token 由管理员通过管理接口创建。
+所有容器操作使用 `Authorization: Bearer cvl_xxx` 认证，每个用户只能操作自己的容器。
 
 ### `POST /api/containers` — 创建容器
+
+**请求头**：`Authorization: Bearer <user-token>`
 
 **请求体**：
 ```json
 {
-  "token":       "<user-token>",
   "cpu":         1,
   "mem":         512,
   "disk":        10,
@@ -69,7 +80,6 @@ Base URL: `https://<host>:<port>` (default port: `8080`, or `443` with autocert)
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `token` | string | ✅ | 用户 token |
 | `cpu` | int | ❌ | CPU 核数，默认 1 |
 | `mem` | int | ❌ | 内存限制 (MB)，默认 512 |
 | `disk` | int | ❌ | 磁盘上限 (GB)，0 或不传 = 不受限 |
@@ -94,9 +104,11 @@ Base URL: `https://<host>:<port>` (default port: `8080`, or `443` with autocert)
 }
 ```
 
-### `GET /api/containers` — 列出容器
+### `GET /api/containers` — 列出我的容器
 
-返回所有容器（无 token 过滤，当前实现返回全部）。
+只返回当前用户创建的容器。
+
+**请求头**：`Authorization: Bearer <user-token>`
 
 **响应** `200`：
 ```json
@@ -112,11 +124,17 @@ Base URL: `https://<host>:<port>` (default port: `8080`, or `443` with autocert)
 
 ### `GET /api/containers/{name}` — 获取容器详情
 
+只能查看自己的容器，非自己的返回 404。
+
+**请求头**：`Authorization: Bearer <user-token>`
+
 **响应** `200`：LXD 容器信息对象
 
 ### `PUT /api/containers/{name}/resize` — 调整容器规格
 
-可单独调整 CPU、内存或磁盘，传 0 表示保持不变。
+可单独调整 CPU、内存或磁盘，传 0 表示保持不变。只能调整自己的容器。
+
+**请求头**：`Authorization: Bearer <user-token>`
 
 **请求体**：
 ```json
@@ -130,7 +148,9 @@ Base URL: `https://<host>:<port>` (default port: `8080`, or `443` with autocert)
 
 ### `DELETE /api/containers/{name}` — 删除容器
 
-停止并删除容器，清理端口转发和注册信息。
+停止并删除容器，清理端口转发。只能删除自己的容器。
+
+**请求头**：`Authorization: Bearer <user-token>`
 
 **响应** `200`：
 ```json
@@ -141,15 +161,13 @@ Base URL: `https://<host>:<port>` (default port: `8080`, or `443` with autocert)
 
 ## 管理接口（Admin Token 认证）
 
-所有管理操作需要 `adminToken` 认证。先通过 `POST /api/admin/login` 用密码换取 token，
-再携带 token 调用后续接口。对于 `GET`/`DELETE` 请求，通过 query 参数传递；对于 `POST`/`PUT` 请求，通过请求体传递。CLI 也可用 `lxc-manager admin create <name>` 创建 token。
+所有管理操作使用 `Authorization: Bearer cva_xxx` 认证。先通过 `POST /api/admin/login` 用密码换取 token。
 
 ### `POST /api/nodes` — 添加节点
 
-**请求体**：
+**请求头**：`Authorization: Bearer <admin-token>`
 ```json
 {
-  "adminToken":  "<admin-token>",
   "name":        "tokyo-1",
   "region":      "tokyo",
   "sshHost":     "192.168.1.10",
@@ -177,7 +195,7 @@ Base URL: `https://<host>:<port>` (default port: `8080`, or `443` with autocert)
 }
 ```
 
-### `GET /api/nodes?adminToken=<token>` — 列出所有节点
+### `GET /api/nodes` — 列出所有节点
 
 **响应** `200`：
 ```json
@@ -195,7 +213,7 @@ Base URL: `https://<host>:<port>` (default port: `8080`, or `443` with autocert)
 ]
 ```
 
-### `GET /api/nodes/{id}/containers?adminToken=<token>` — 查询节点上所有容器
+### `GET /api/nodes/{id}/containers` — 查询节点上所有容器
 
 **响应** `200`：
 ```json
@@ -209,7 +227,7 @@ Base URL: `https://<host>:<port>` (default port: `8080`, or `443` with autocert)
 ]
 ```
 
-### `DELETE /api/nodes/{id}?adminToken=<token>` — 删除节点
+### `DELETE /api/nodes/{id}` — 删除节点
 
 **响应** `200`：
 ```json
@@ -223,7 +241,6 @@ Base URL: `https://<host>:<port>` (default port: `8080`, or `443` with autocert)
 **请求体**：
 ```json
 {
-  "adminToken": "<admin-token>",
   "name":       "alice"
 }
 ```
@@ -237,7 +254,7 @@ Base URL: `https://<host>:<port>` (default port: `8080`, or `443` with autocert)
 }
 ```
 
-### `GET /api/users?adminToken=<token>` — 列出所有用户
+### `GET /api/users` — 列出所有用户
 
 **响应** `200`：
 ```json
@@ -250,7 +267,7 @@ Base URL: `https://<host>:<port>` (default port: `8080`, or `443` with autocert)
 ]
 ```
 
-### `DELETE /api/users/{userID}?adminToken=<token>` — 删除用户
+### `DELETE /api/users/{userID}` — 删除用户
 
 删除用户将同时销毁其名下所有容器，清理所有 token。支持传入 userID 或 name。
 
@@ -269,7 +286,6 @@ Base URL: `https://<host>:<port>` (default port: `8080`, or `443` with autocert)
 **请求体**：
 ```json
 {
-  "adminToken": "<admin-token>"
 }
 ```
 
@@ -289,7 +305,6 @@ Base URL: `https://<host>:<port>` (default port: `8080`, or `443` with autocert)
 **请求体**：
 ```json
 {
-  "adminToken": "<admin-token>",
   "name":       "bob"
 }
 ```
@@ -304,14 +319,15 @@ Base URL: `https://<host>:<port>` (default port: `8080`, or `443` with autocert)
 
 ---
 
-## 认证方式总结
+## 认证方式
 
-| 接口 | 认证方式 | 参数位置 |
-|------|----------|----------|
-| 用户容器接口 | User Token | 请求体 `token` 字段 |
-| 管理接口 (GET/DELETE) | Admin Token | Query 参数 `?adminToken=...` |
-| 管理接口 (POST) | Admin Token | 请求体 `adminToken` 字段 |
-| 公共接口 (`/health`, `/_version`, `/admin/login`) | 无（login 用密码） | — |
+所有需要认证的接口统一使用 HTTP 头：`Authorization: Bearer <token>`
+
+| 接口组 | Token 前缀 | 获取方式 |
+|--------|-----------|---------|
+| 管理接口 | `cva_xxx` | `POST /api/admin/login` |
+| 用户接口 | `cvl_xxx` | 管理员通过 `POST /api/users` 创建 |
+| 公共接口 | 无需认证 | — |
 
 ## 容器生命周期
 

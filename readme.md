@@ -56,6 +56,7 @@ lxc-manager install --domain your-domain.com
 | `GET` | `/_version` | 无 | 版本号 |
 | `GET` | `/api/health` | 无 | 健康检查 |
 | `POST` | `/api/admin/login` | 无 | 管理员登录（密码 → token） |
+| `GET` | `/api/regions` | 无 | 可用区域列表 |
 | `POST` | `/api/nodes` | admin | 添加节点 |
 | `GET` | `/api/nodes` | admin | 列出节点 |
 | `GET` | `/api/nodes/:id/containers` | admin | 节点上所有容器 |
@@ -65,35 +66,40 @@ lxc-manager install --domain your-domain.com
 | `DELETE` | `/api/users/:id` | admin | 删除用户（销毁所有容器） |
 | `PUT` | `/api/users/:id/token` | admin | 重置用户 token |
 | `PUT` | `/api/users/:id/name` | admin | 修改用户名称 |
-| `POST` | `/api/containers` | user | 创建容器 |
-| `GET` | `/api/containers` | user | 列出容器 |
-| `GET` | `/api/containers/:name` | user | 查看容器 |
-| `DELETE` | `/api/containers/:name` | user | 删除容器 |
-| `PUT` | `/api/containers/:name/resize` | user | 调整规格 |
+| `POST` | `/api/containers` | user | 创建容器（仅自己的） |
+| `GET` | `/api/containers` | user | 列出我的容器 |
+| `GET` | `/api/containers/:name` | user | 查看容器（仅自己的） |
+| `DELETE` | `/api/containers/:name` | user | 删除容器（仅自己的） |
+| `PUT` | `/api/containers/:name/resize` | user | 调整规格（仅自己的） |
 
 ### 认证传递
 
-- **Admin token**: POST/PUT 在 body 中传 `"adminToken":"cva_..."`，GET/DELETE 在 query 中传 `?adminToken=cva_...`
-- **User token**: POST body 中传 `"token":"cvl_..."`
+所有需要认证的接口统一使用 HTTP 头：
+
+```
+Authorization: Bearer <token>
+```
+
+- **Admin token** (`cva_` 前缀)：通过 `POST /api/admin/login` 用密码换取
+- **User token** (`cvl_` 前缀)：管理员通过 `POST /api/users` 创建
 
 ### 创建容器
 
 ```json
 POST /api/containers
+Authorization: Bearer cvl_xxxxxxxx
 {
-  "token": "cvl_xxxxxxxx",
   "cpu": 1,
   "mem": 512,
   "disk": 10,
   "servicePort": 443,
-  "nodeID": "nd_abc123",
+  "region": "tokyo",
   "userData": "#cloud-config\n..."
 }
 ```
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `token` | string | ✅ | 用户 token |
 | `cpu` | int | ❌ | CPU 核数，默认 1 |
 | `mem` | int | ❌ | 内存 (MB)，默认 512 |
 | `disk` | int | ❌ | 磁盘上限 (GB)，0 或不传 = 不受限 |

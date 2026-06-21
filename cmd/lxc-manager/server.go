@@ -25,7 +25,6 @@ var lxdClient *lxc.Client
 // ==================== Request / Response ====================
 
 type CreateReq struct {
-	Token       string `json:"token"`
 	CPU         int    `json:"cpu"`
 	Mem         int    `json:"mem"`
 	Disk        int    `json:"disk"`
@@ -210,7 +209,33 @@ func filepathJoin(parts ...string) string {
 	return strings.Join(parts, string(os.PathSeparator))
 }
 
-// ==================== adminTokenFromRequest ====================
+// ==================== Auth Helpers ====================
+
+// getBearerToken extracts the token from the Authorization: Bearer header.
+func getBearerToken(r *http.Request) string {
+	auth := r.Header.Get("Authorization")
+	if strings.HasPrefix(auth, "Bearer ") {
+		return strings.TrimPrefix(auth, "Bearer ")
+	}
+	return ""
+}
+
+// validateAdmin returns true if the request carries a valid admin token.
+func validateAdmin(r *http.Request) bool {
+	tok := getBearerToken(r)
+	return tok != "" && validateAdminToken(tok)
+}
+
+// validateUser returns (true, userID) if the request carries a valid user token.
+func validateUser(r *http.Request) (bool, string) {
+	tok := getBearerToken(r)
+	if tok == "" || !validateUserToken(tok) {
+		return false, ""
+	}
+	return true, getUserIDByToken(tok)
+}
+
+// ==================== adminTokenFromRequest (kept for backward compat, not used by new routes) ====================
 
 func adminTokenFromRequest(r *http.Request) string {
 	switch r.Method {
@@ -282,9 +307,11 @@ func recoverInstances() {
 // ==================== Container Handlers ====================
 
 func handleCreate(w http.ResponseWriter, r *http.Request) {
+	ok, userID := validateUser(r)
+	if !ok { jsonError(w, "unauthorized", 401); return }
+
 	var req CreateReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil { jsonError(w, "invalid body", 400); return }
-	if req.Token == "" || !validateUserToken(req.Token) { jsonError(w, "invalid token", 401); return }
 	if req.ServicePort <= 0 || req.ServicePort > 65535 { jsonError(w, "servicePort required (1-65535)", 400); return }
 	if req.CPU <= 0 { req.CPU = 1 }
 	if req.Mem <= 0 { req.Mem = 512 }
@@ -322,8 +349,8 @@ func handleCreate(w http.ResponseWriter, r *http.Request) {
 		Mem:         req.Mem,
 		Disk:        req.Disk,
 		ServicePort: req.ServicePort,
-		UserID:      getUserIDByToken(req.Token),
-		Token:       req.Token,
+		UserID:      userID,
+		Token:       getBearerToken(r),
 		Node:        nodeID,
 	}
 
@@ -389,19 +416,59 @@ func clientForInstance(name string) *lxc.Client {
 }
 
 func handleList(w http.ResponseWriter, r *http.Request) {
+	ok, userID := validateUser(r)
+	if !ok { jsonError(w, "unauthorized", 401); return }
+
+	instMu.Lock()
+	var mine []string
+	for name, rec := range instances {
+		if rec.UserID == userID {
+			mine = append(mine, name)
+		}
+	}
+	instMu.Unlock()
+
+	if len(mine) == 0 {
+		jsonOK(w, []map[string]string{})
+		return
+	}
+
+	// List LXD containers, filter by owned names
 	if len(nodes) == 0 && lxdClient == nil {
-		jsonOK(w, []lxc.Container{})
+		jsonOK(w, []map[string]string{})
 		return
 	}
 	cli := lxdClient
 	for _, c := range pool { cli = c; break }
-	containers, _ := cli.ListContainers(env("LXC_NAME_PREFIX", "user-"))
-	jsonOK(w, containers)
+	all, _ := cli.ListContainers(env("LXC_NAME_PREFIX", "user-"))
+
+	ownedSet := map[string]bool{}
+	for _, n := range mine { ownedSet[n] = true }
+
+	var result []lxc.Container
+	for _, c := range all {
+		if ownedSet[c.Name] {
+			result = append(result, c)
+		}
+	}
+	jsonOK(w, result)
 }
 
 func handleGet(w http.ResponseWriter, r *http.Request) {
 	name := stripPrefix(r.URL.Path, "/api/containers/")
 	if name == "" { jsonError(w, "name required", 400); return }
+
+	ok, userID := validateUser(r)
+	if !ok { jsonError(w, "unauthorized", 401); return }
+
+	instMu.Lock()
+	rec, exists := instances[name]
+	instMu.Unlock()
+	if !exists || rec.UserID != userID {
+		jsonError(w, "not found", 404)
+		return
+	}
+
 	c, err := clientForInstance(name).GetContainer(name)
 	if err != nil { jsonError(w, fmt.Sprintf("get: %v", err), 404); return }
 	jsonOK(w, c)
@@ -409,16 +476,24 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 
 func handleDelete(w http.ResponseWriter, r *http.Request) {
 	name := stripPrefix(r.URL.Path, "/api/containers/")
-	cli := clientForInstance(name)
 
+	ok, userID := validateUser(r)
+	if !ok { jsonError(w, "unauthorized", 401); return }
+
+	instMu.Lock()
+	rec, exists := instances[name]
+	instMu.Unlock()
+	if !exists || rec.UserID != userID {
+		jsonError(w, "not found", 404)
+		return
+	}
+
+	cli := clientForInstance(name)
 	container, err := cli.GetContainer(name)
 	if err != nil { jsonError(w, fmt.Sprintf("get: %v", err), 404); return }
 
 	vip, _ := cli.InstanceIPv4(name, 5*time.Second)
-	instMu.Lock()
-	rec, ok := instances[name]
-	instMu.Unlock()
-	if ok && vip != "" {
+	if vip != "" {
 		delPortForward(rec.SSHExtPort, vip, 22)
 		delPortForward(rec.ServiceExtPort, vip, rec.ServicePort)
 	}
@@ -433,20 +508,26 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 
 func handleResize(w http.ResponseWriter, r *http.Request) {
 	name := stripPrefix(strings.TrimSuffix(r.URL.Path, "/resize"), "/api/containers/")
+
+	ok, userID := validateUser(r)
+	if !ok { jsonError(w, "unauthorized", 401); return }
+
 	var req ResizeReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil { jsonError(w, "invalid body", 400); return }
 	if req.CPU <= 0 && req.Mem <= 0 && req.Disk <= 0 { jsonError(w, "cpu, mem, or disk required", 400); return }
 
 	instMu.Lock()
-	rec, ok := instances[name]
-	if ok {
-		if req.CPU > 0 { rec.CPU = req.CPU }
-		if req.Mem > 0 { rec.Mem = req.Mem }
-		if req.Disk > 0 { rec.Disk = req.Disk }
-		saveInstances()
+	rec, exists := instances[name]
+	if !exists || rec.UserID != userID {
+		instMu.Unlock()
+		jsonError(w, "not found", 404)
+		return
 	}
+	if req.CPU > 0 { rec.CPU = req.CPU }
+	if req.Mem > 0 { rec.Mem = req.Mem }
+	if req.Disk > 0 { rec.Disk = req.Disk }
+	saveInstances()
 	instMu.Unlock()
-	if !ok { jsonError(w, "instance not found", 404); return }
 
 	if err := clientForInstance(name).ResizeContainer(name, rec.CPU, rec.Mem, rec.Disk); err != nil { jsonError(w, fmt.Sprintf("resize: %v", err), 500); return }
 	jsonOK(w, map[string]interface{}{"status": "resized", "cpu": rec.CPU, "mem": rec.Mem, "disk": rec.Disk})
@@ -630,48 +711,69 @@ func handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]string{"adminToken": token})
 }
 
+func handleRegions(w http.ResponseWriter, r *http.Request) {
+	nodesMu.Lock()
+	seen := map[string]bool{}
+	for _, rec := range nodes {
+		if rec.Region != "" {
+			seen[rec.Region] = true
+		}
+	}
+	nodesMu.Unlock()
+
+	var regions []string
+	for r := range seen {
+		regions = append(regions, r)
+	}
+	jsonOK(w, regions)
+}
+
 func handler(w http.ResponseWriter, r *http.Request) {
 	p := r.URL.Path
 	switch {
-	// Admin login (no auth)
+	// Public (no auth)
 	case p == "/api/admin/login" && r.Method == "POST":
 		handleAdminLogin(w, r)
+	case p == "/api/regions" && r.Method == "GET":
+		handleRegions(w, r)
+	case p == "/api/health" && r.Method == "GET":
+		jsonOK(w, map[string]string{"status": "ok"})
 	// Nodes (admin auth)
 	case p == "/api/nodes" && r.Method == "POST":
-		if !validateAdminToken(adminTokenFromRequest(r)) { jsonError(w, "unauthorized", 401); return }
+		if !validateAdmin(r) { jsonError(w, "unauthorized", 401); return }
 		handleNodeAdd(w, r)
 	case p == "/api/nodes" && r.Method == "GET":
-		if !validateAdminToken(adminTokenFromRequest(r)) { jsonError(w, "unauthorized", 401); return }
+		if !validateAdmin(r) { jsonError(w, "unauthorized", 401); return }
 		handleNodeList(w, r)
 	case strings.HasPrefix(p, "/api/nodes/") && strings.HasSuffix(p, "/containers") && r.Method == "GET":
-		if !validateAdminToken(adminTokenFromRequest(r)) { jsonError(w, "unauthorized", 401); return }
+		if !validateAdmin(r) { jsonError(w, "unauthorized", 401); return }
 		handleNodeContainers(w, r)
 	case strings.HasPrefix(p, "/api/nodes/") && r.Method == "DELETE":
 		if strings.HasSuffix(p, "/containers") {
 			jsonError(w, "not found", 404); return
 		}
-		if !validateAdminToken(adminTokenFromRequest(r)) { jsonError(w, "unauthorized", 401); return }
+		if !validateAdmin(r) { jsonError(w, "unauthorized", 401); return }
 		handleNodeDelete(w, r)
 	// Users (admin auth)
 	case p == "/api/users" && r.Method == "POST":
-		if !validateAdminToken(adminTokenFromRequest(r)) { jsonError(w, "unauthorized", 401); return }
+		if !validateAdmin(r) { jsonError(w, "unauthorized", 401); return }
 		handleUserCreate(w, r)
 	case p == "/api/users" && r.Method == "GET":
-		if !validateAdminToken(adminTokenFromRequest(r)) { jsonError(w, "unauthorized", 401); return }
+		if !validateAdmin(r) { jsonError(w, "unauthorized", 401); return }
 		handleUserList(w, r)
 	case strings.HasPrefix(p, "/api/users/") && r.Method == "DELETE":
 		if strings.HasSuffix(p, "/token") || strings.HasSuffix(p, "/name") {
 			jsonError(w, "not found", 404); return
 		}
-		if !validateAdminToken(adminTokenFromRequest(r)) { jsonError(w, "unauthorized", 401); return }
+		if !validateAdmin(r) { jsonError(w, "unauthorized", 401); return }
 		handleUserDelete(w, r)
 	case strings.HasPrefix(p, "/api/users/") && strings.HasSuffix(p, "/token") && r.Method == "PUT":
-		if !validateAdminToken(adminTokenFromRequest(r)) { jsonError(w, "unauthorized", 401); return }
+		if !validateAdmin(r) { jsonError(w, "unauthorized", 401); return }
 		handleUserResetToken(w, r)
 	case strings.HasPrefix(p, "/api/users/") && strings.HasSuffix(p, "/name") && r.Method == "PUT":
-		if !validateAdminToken(adminTokenFromRequest(r)) { jsonError(w, "unauthorized", 401); return }
+		if !validateAdmin(r) { jsonError(w, "unauthorized", 401); return }
 		handleUserRename(w, r)
-	// Containers (user auth)
+	// Containers (user auth, scoped by token)
 	case p == "/api/containers" && r.Method == "POST":
 		handleCreate(w, r)
 	case p == "/api/containers" && r.Method == "GET":
@@ -682,8 +784,6 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		handleGet(w, r)
 	case strings.HasPrefix(p, "/api/containers/") && r.Method == "DELETE":
 		handleDelete(w, r)
-	case p == "/api/health":
-		jsonOK(w, map[string]string{"status": "ok"})
 	default:
 		jsonError(w, "not found", 404)
 	}
