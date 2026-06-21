@@ -1,0 +1,112 @@
+name: Deploy LXC Manager
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Operation
+        required: true
+        type: choice
+        options:
+          - deploy
+          - destroy
+      lxc_manager_version:
+        description: 'lxc-manager release tag (e.g. v1.0.0). Default: latest'
+        required: false
+        type: string
+        default: 'latest'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lxc-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: prod
+    env:
+      TF_BACKEND_CONFIG_FILE: ./deploy/backends/prod.r2.hcl
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Load secrets from Bitwarden
+        uses: bitwarden/sm-action@v3.0.0
+        with:
+          access_token: ${{ secrets.BW_SM_ACCESS_TOKEN }}
+          cloud_region: ${{ vars.BW_CLOUD_REGION || 'us' }}
+          secrets: |
+            ${{ vars.BW_SECRET_ID_CF_API_TOKEN }} > CF_API_TOKEN
+            ${{ vars.BW_SECRET_ID_VULTR_API_KEY }} > VULTR_API_KEY
+            ${{ vars.BW_SECRET_ID_LXC_SSH_PUBLIC_KEY }} > LXC_SSH_PUBLIC_KEY
+            ${{ vars.BW_SECRET_ID_LXC_ADMIN_PASSWORD_HASH }} > LXC_ADMIN_PASSWORD_HASH
+            ${{ vars.BW_SECRET_ID_R2_ACCOUNT_ID }} > R2_ACCOUNT_ID
+            ${{ vars.BW_SECRET_ID_R2_ACCESS_KEY_ID }} > R2_ACCESS_KEY_ID
+            ${{ vars.BW_SECRET_ID_R2_SECRET_ACCESS_KEY }} > R2_SECRET_ACCESS_KEY
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        env:
+          TF_BACKEND_R2_ACCOUNT_ID: ${{ env.R2_ACCOUNT_ID }}
+          TF_BACKEND_R2_ACCESS_KEY_ID: ${{ env.R2_ACCESS_KEY_ID }}
+          TF_BACKEND_R2_SECRET_ACCESS_KEY: ${{ env.R2_SECRET_ACCESS_KEY }}
+        run: |
+          terraform -chdir=deploy/terraform init \
+            -backend-config="${TF_BACKEND_CONFIG_FILE}" \
+            -reconfigure
+
+      - name: Terraform Plan (deploy)
+        if: inputs.action == 'deploy'
+        run: |
+          terraform -chdir=deploy/terraform plan \
+            -var "vultr_api_key=$VULTR_API_KEY" \
+            -var "cloudflare_api_token=$CF_API_TOKEN" \
+            -var "lxc_manager_version=${{ inputs.lxc_manager_version }}" \
+            -var "ssh_public_key=$LXC_SSH_PUBLIC_KEY" \
+            -var "admin_password_hash=$LXC_ADMIN_PASSWORD_HASH" \
+            -var "r2_account_id=$R2_ACCOUNT_ID" \
+            -var "r2_access_key_id=$R2_ACCESS_KEY_ID" \
+            -var "r2_secret_access_key=$R2_SECRET_ACCESS_KEY" \
+            -out=tfplan
+
+      - name: Terraform Apply (deploy)
+        if: inputs.action == 'deploy'
+        run: |
+          terraform -chdir=deploy/terraform apply tfplan
+
+      - name: Terraform Destroy
+        if: inputs.action == 'destroy'
+        run: |
+          terraform -chdir=deploy/terraform destroy \
+            -var "vultr_api_key=$VULTR_API_KEY" \
+            -var "cloudflare_api_token=$CF_API_TOKEN" \
+            -var "lxc_manager_version=${{ inputs.lxc_manager_version }}" \
+            -var "ssh_public_key=$LXC_SSH_PUBLIC_KEY" \
+            -var "admin_password_hash=$LXC_ADMIN_PASSWORD_HASH" \
+            -var "r2_account_id=$R2_ACCOUNT_ID" \
+            -var "r2_access_key_id=$R2_ACCESS_KEY_ID" \
+            -var "r2_secret_access_key=$R2_SECRET_ACCESS_KEY" \
+            -auto-approve
+
+      - name: Show outputs
+        if: inputs.action == 'deploy'
+        run: |
+          terraform -chdir=deploy/terraform output
+          {
+            echo "## LXC Manager Deployed :rocket:"
+            echo
+            echo "| Key | Value |"
+            echo "|-----|-------|"
+            echo "| API URL | \`$(terraform -chdir=deploy/terraform output -raw api_url)\` |"
+            echo "| VPS IP  | \`$(terraform -chdir=deploy/terraform output -raw vps_main_ip)\` |"
+            echo "| SSH     | \`$(terraform -chdir=deploy/terraform output -raw ssh_command)\` |"
+            echo
+            echo "Login at \`$(terraform -chdir=deploy/terraform output -raw admin_login_url)\` with the admin password."
+          } >> "$GITHUB_STEP_SUMMARY"

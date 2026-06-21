@@ -1,0 +1,101 @@
+#cloud-config
+hostname: ${hostname}
+preserve_hostname: false
+fqdn: ${fqdn}
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - curl
+  - gzip
+
+write_files:
+  # lxc-manager config
+  - path: /etc/lxc-manager/config.json
+    permissions: '0600'
+    owner: root:root
+    content: |
+      {
+        "domain": "${fqdn}",
+        "port": "443",
+        "lxd_client_cert": "/etc/lxc-manager/client.crt",
+        "lxd_client_key": "/etc/lxc-manager/client.key",
+        "backup": {
+          "enabled": true,
+          "interval": "${backup_interval}",
+          "r2_endpoint": "${r2_endpoint}",
+          "r2_bucket": "${r2_bucket}",
+          "r2_access_key_id": "${r2_access_key_id}",
+          "r2_secret_access_key": "${r2_secret_access_key}"
+        }
+      }
+
+  # bcrypt hash of admin password for login
+  - path: /var/lib/clever-vpn-lxc/.admin-password
+    permissions: '0600'
+    owner: root:root
+    content: ${admin_password_hash}
+
+runcmd:
+  # Download and install lxc-manager binary
+  - |
+    set -e
+    ARCH=$(uname -m)
+    case "$ARCH" in
+      x86_64)  GOARCH="amd64" ;;
+      aarch64) GOARCH="arm64" ;;
+      *)       echo "unsupported arch: $ARCH"; exit 1 ;;
+    esac
+
+    TAG="${lxc_manager_version}"
+    BASE="https://github.com/clever-vpn/clever-vpn-lxc/releases/download/$TAG"
+    ASSET="lxc-manager-$GOARCH-$TAG.gz"
+    SHA="$ASSET.sha256"
+
+    cd /tmp
+    curl -fLO "$BASE/$SHA"
+    curl -fLO "$BASE/$ASSET"
+
+    EXPECTED=$(awk '{print $1}' "$SHA")
+    ACTUAL=$(sha256sum "$ASSET" | awk '{print $1}')
+    if [ "$EXPECTED" != "$ACTUAL" ]; then
+      echo "checksum mismatch"
+      exit 1
+    fi
+
+    gunzip "$ASSET"
+    BIN="lxc-manager-$GOARCH-$TAG"
+    chmod +x "$BIN"
+    mv "$BIN" /usr/local/bin/lxc-manager
+
+  # Generate LXD client cert and install service
+  - |
+    set -e
+    mkdir -p /etc/lxc-manager /var/lib/clever-vpn-lxc
+
+    lxc-manager cert gen /etc/lxc-manager
+
+    lxc-manager install --config /etc/lxc-manager/config.json --domain ${fqdn}
+
+  # Set LXD client cert/key env vars in systemd override
+  - |
+    mkdir -p /etc/systemd/system/lxc-manager.service.d
+    cat > /etc/systemd/system/lxc-manager.service.d/override.conf <<'EOF'
+[Service]
+Environment="LXD_CLIENT_CERT=/etc/lxc-manager/client.crt"
+Environment="LXD_CLIENT_KEY=/etc/lxc-manager/client.key"
+EOF
+    systemctl daemon-reload
+    systemctl restart lxc-manager
+
+  # Firewall
+  - ufw allow 22/tcp
+  - ufw allow 80/tcp
+  - ufw allow 443/tcp
+  - ufw --force enable
+
+users:
+  - name: root
+    ssh_authorized_keys:
+      - ${ssh_public_key}

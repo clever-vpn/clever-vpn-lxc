@@ -146,46 +146,97 @@ func cmdAddUser() {
 	}
 	name := os.Args[2]
 
-	loadUserTokens()
-	token, err := addUserToken(name)
+	loadUsers()
+	userID, token, err := addUser(name)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("User token created:\n  name: %s\n  token: %s\n", name, token)
+	fmt.Printf("User created:\n  id: %s\n  name: %s\n  token: %s\n", userID, name, token)
 }
 
 // ==================== remove-user ====================
 
 func cmdRemoveUser() {
 	if len(os.Args) < 3 {
-		fmt.Fprintf(os.Stderr, "Usage: lxc-manager remove-user <name>\n")
+		fmt.Fprintf(os.Stderr, "Usage: lxc-manager remove-user <userID or name>\n")
 		os.Exit(1)
 	}
-	name := os.Args[2]
+	input := os.Args[2]
 
-	loadUserTokens()
-	if err := removeUserToken(name); err != nil {
+	loadUsers()
+	userID := resolveUserID(input)
+	if userID == "" {
+		fmt.Fprintf(os.Stderr, "Error: user %s not found\n", input)
+		os.Exit(1)
+	}
+	if err := deleteUser(userID); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("User removed: %s\n", name)
+	fmt.Printf("User removed: %s\n", input)
+}
+
+// ==================== reset-user-token ====================
+
+func cmdResetUserToken() {
+	if len(os.Args) < 3 {
+		fmt.Fprintf(os.Stderr, "Usage: lxc-manager reset-user-token <userID or name>\n")
+		os.Exit(1)
+	}
+	input := os.Args[2]
+
+	loadUsers()
+	userID := resolveUserID(input)
+	if userID == "" {
+		fmt.Fprintf(os.Stderr, "Error: user %s not found\n", input)
+		os.Exit(1)
+	}
+	rec, _ := getUserByID(userID)
+	token, err := regenerateUserToken(userID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("User token reset:\n  id: %s\n  name: %s\n  token: %s\n", userID, rec.Name, token)
 }
 
 // ==================== list-users ====================
 
 func cmdListUsers() {
-	loadUserTokens()
-	loadInstances()
-	users := listUsers()
-	if len(users) == 0 {
+	loadUsers()
+	userList := listUsers()
+	if len(userList) == 0 {
 		fmt.Println("No users.")
 		return
 	}
-	fmt.Printf("%-20s %s\n", "NAME", "CONTAINERS")
-	for _, u := range users {
-		fmt.Printf("%-20s %d\n", u.Name, u.Containers)
+	fmt.Printf("%-24s %-20s %s\n", "ID", "NAME", "CONTAINERS")
+	for _, u := range userList {
+		fmt.Printf("%-24s %-20s %d\n", u.ID, u.Name, u.Containers)
 	}
+}
+
+// ==================== rename-user ====================
+
+func cmdRenameUser() {
+	if len(os.Args) < 4 {
+		fmt.Fprintf(os.Stderr, "Usage: lxc-manager rename-user <userID or name> <newName>\n")
+		os.Exit(1)
+	}
+	input := os.Args[2]
+	newName := os.Args[3]
+
+	loadUsers()
+	userID := resolveUserID(input)
+	if userID == "" {
+		fmt.Fprintf(os.Stderr, "Error: user %s not found\n", input)
+		os.Exit(1)
+	}
+	if err := updateUserName(userID, newName); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("User renamed:\n  id: %s\n  name: %s\n", userID, newName)
 }
 
 // ==================== add-node ====================

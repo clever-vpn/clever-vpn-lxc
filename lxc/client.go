@@ -35,18 +35,28 @@ func NewClient(lxdURL string, clientCert string, clientKey string) (*Client, err
 	return &Client{server: server}, nil
 }
 
-func (c *Client) CreateContainer(name, image, network string, cpu int, memMB int, config map[string]string) error {
+func (c *Client) CreateContainer(name, image, network string, cpu int, memMB int, diskGB int, config map[string]string) error {
+	devices := map[string]map[string]string{
+		"eth0": {
+			"type":    "nic",
+			"network": network,
+		},
+	}
+	if diskGB > 0 {
+		devices["root"] = map[string]string{
+			"type": "disk",
+			"path": "/",
+			"pool": "default",
+			"size": fmt.Sprintf("%dGB", diskGB),
+		}
+	}
+
 	post := api.InstancesPost{
 		Name: name,
 		Type: "container",
 		InstancePut: api.InstancePut{
-			Config: config,
-			Devices: map[string]map[string]string{
-				"eth0": {
-					"type":    "nic",
-					"network": network,
-				},
-			},
+			Config:  config,
+			Devices: devices,
 		},
 		Source: api.InstanceSource{
 			Type:  "image",
@@ -137,7 +147,7 @@ func (c *Client) ListContainers(prefix string) ([]Container, error) {
 	return containers, nil
 }
 
-func (c *Client) ResizeContainer(name string, cpu int, memMB int) error {
+func (c *Client) ResizeContainer(name string, cpu int, memMB int, diskGB int) error {
 	inst, etag, err := c.server.GetInstance(name)
 	if err != nil {
 		return err
@@ -149,6 +159,18 @@ func (c *Client) ResizeContainer(name string, cpu int, memMB int) error {
 	}
 	put.Config["limits.cpu"] = fmt.Sprintf("%d", cpu)
 	put.Config["limits.memory"] = fmt.Sprintf("%dMB", memMB)
+
+	if diskGB > 0 {
+		if put.Devices == nil {
+			put.Devices = map[string]map[string]string{}
+		}
+		root, ok := put.Devices["root"]
+		if !ok {
+			root = map[string]string{"type": "disk", "path": "/"}
+		}
+		root["size"] = fmt.Sprintf("%dGB", diskGB)
+		put.Devices["root"] = root
+	}
 
 	op, err := c.server.UpdateInstance(name, put, etag)
 	if err != nil {

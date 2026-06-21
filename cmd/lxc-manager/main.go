@@ -30,9 +30,13 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  list-nodes     List all nodes\n")
 		fmt.Fprintf(os.Stderr, "  add-user       Create user token\n")
 		fmt.Fprintf(os.Stderr, "  remove-user    Delete user\n")
+		fmt.Fprintf(os.Stderr, "  reset-user-token Reset user token\n")
+		fmt.Fprintf(os.Stderr, "  rename-user    Rename a user\n")
 		fmt.Fprintf(os.Stderr, "  list-users     List users with container counts\n")
 		fmt.Fprintf(os.Stderr, "  backup         Sync data to R2/S3\n")
 		fmt.Fprintf(os.Stderr, "  restore        Restore data from R2/S3\n")
+		fmt.Fprintf(os.Stderr, "  version        Print version\n")
+		fmt.Fprintf(os.Stderr, "  update         Self-update from GitHub releases (--tag v1.0.0)\n")
 		os.Exit(1)
 	}
 
@@ -57,12 +61,20 @@ func main() {
 		cmdAddUser()
 	case "remove-user":
 		cmdRemoveUser()
+	case "reset-user-token":
+		cmdResetUserToken()
+	case "rename-user":
+		cmdRenameUser()
 	case "list-users":
 		cmdListUsers()
 	case "backup":
 		cmdBackup()
 	case "restore":
 		cmdRestore()
+	case "version":
+		cmdVersion()
+	case "update":
+		cmdUpdate()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", os.Args[1])
 		os.Exit(1)
