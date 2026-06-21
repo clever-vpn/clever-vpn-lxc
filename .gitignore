@@ -1,2 +1,10 @@
 # Binary
 clever-vpn-lxc
+lxc-manager
+
+# TLS keys and certs
+*.key
+*.crt
+
+# Runtime data
+/var/

@@ -22,10 +22,15 @@ type Container struct {
 	} `json:"state"`
 }
 
-func NewClient(socketPath string) (*Client, error) {
-	server, err := lxd.ConnectLXDUnix(socketPath, nil)
+func NewClient(lxdURL string, clientCert string, clientKey string) (*Client, error) {
+	args := &lxd.ConnectionArgs{
+		TLSClientCert:      clientCert,
+		TLSClientKey:       clientKey,
+		InsecureSkipVerify: true, // we trust nodes by SSH provisioning, not by server cert
+	}
+	server, err := lxd.ConnectLXD(lxdURL, args)
 	if err != nil {
-		return nil, fmt.Errorf("connect lxd unix socket %s: %w", socketPath, err)
+		return nil, fmt.Errorf("connect lxd %s: %w", lxdURL, err)
 	}
 	return &Client{server: server}, nil
 }

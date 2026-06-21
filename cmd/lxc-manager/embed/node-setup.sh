@@ -66,7 +66,7 @@ install_lxd() {
 }
 
 init_lxd() {
-    if lxc network list 2>/dev/null | grep -q lxdbr0; then
+    if lxc network show lxdbr0 &>/dev/null; then
         log_info "LXD already initialized"
         return 0
     fi
@@ -88,7 +88,7 @@ setup_network() {
         log_info "Network '$CONTAINER_NETWORK' already exists"
         # Ensure DNS is configured on existing network.
         # LXD 6.x does not support dns.nameservers directly; use raw.dnsmasq instead.
-        if ! lxc network show "$CONTAINER_NETWORK" | grep -q 'raw.dnsmasq'; then
+        if ! lxc network get "$CONTAINER_NETWORK" raw.dnsmasq &>/dev/null; then
             lxc network set "$CONTAINER_NETWORK" raw.dnsmasq 'server=8.8.8.8'
         fi
         return 0
@@ -144,9 +144,24 @@ setup_ufw() {
     log_info "UFW rules added for LXD bridges"
 }
 
+# Allow Manager to reach LXD API from remote.
+setup_ufw_allow_lxd_api() {
+    if ! command -v ufw &>/dev/null; then
+        return 0
+    fi
+    if ! ufw status 2>/dev/null | grep -q 'Status: active'; then
+        return 0
+    fi
+    if ufw status verbose 2>/dev/null | grep -q '8443/tcp'; then
+        return 0
+    fi
+    ufw allow 8443/tcp comment 'LXD HTTPS API'
+    log_info "UFW: allowed LXD API port 8443/tcp"
+}
+
 # ==================== 基础镜像构建 ====================
 build_base_image() {
-    if lxc image list 2>/dev/null | grep -q "$BASE_IMAGE_ALIAS"; then
+    if lxc image show "$BASE_IMAGE_ALIAS" &>/dev/null; then
         log_info "Base image '$BASE_IMAGE_ALIAS' already exists. Use --rebuild to recreate."
         return 0
     fi
@@ -204,7 +219,11 @@ build_base_image() {
     # 4. Stop and publish
     log_info "Publishing base image as '$BASE_IMAGE_ALIAS'..."
     lxc stop "$BASE_CONTAINER_NAME"
-    lxc publish "$BASE_CONTAINER_NAME" --alias "$BASE_IMAGE_ALIAS"
+    lxc publish "$BASE_CONTAINER_NAME" --alias "$BASE_IMAGE_ALIAS" 2>/dev/null || {
+        log_info "Image alias already exists, removing old builder"
+        lxc delete "$BASE_CONTAINER_NAME" --force
+        return 0
+    }
     lxc delete "$BASE_CONTAINER_NAME"
 
     log_info "Base image '$BASE_IMAGE_ALIAS' created successfully!"
@@ -212,7 +231,7 @@ build_base_image() {
 
 # ==================== iptables 持久化 ====================
 setup_iptables_persist() {
-    if dpkg -l | grep -q iptables-persistent; then
+    if dpkg -s iptables-persistent &>/dev/null; then
         log_info "iptables-persistent already installed"
         return 0
     fi
@@ -223,30 +242,21 @@ setup_iptables_persist() {
     apt-get install -y iptables-persistent
 }
 
-# ==================== Go API 服务部署 ====================
-install_go_api() {
-    local service_file="/etc/systemd/system/clever-vpn-lxc.service"
-    if systemctl is-active --quiet clever-vpn-lxc 2>/dev/null; then
-        log_info "Go API service already running"
+# ==================== LXD HTTPS / Manager trust ====================
+MANAGER_CERT="${MANAGER_CERT:-}"
+
+setup_lxd_remote() {
+    if [[ -z "$MANAGER_CERT" ]]; then
+        log_info "No --manager-cert provided, skipping LXD HTTPS setup"
         return 0
     fi
 
-    log_info "Installing Go API service..."
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    
-    # Copy service file from repo to systemd
-    if [[ -f "$SCRIPT_DIR/clever-vpn-lxc.service" ]]; then
-        cp "$SCRIPT_DIR/clever-vpn-lxc.service" "$service_file"
-    else
-        log_error "Service file not found at $SCRIPT_DIR/clever-vpn-lxc.service"
-        return 1
-    fi
+    log_info "Enabling LXD HTTPS API on :8443..."
+    lxc config set core.https_address :8443 2>/dev/null || true
 
-    # Enable and start
-    systemctl daemon-reload
-    systemctl enable clever-vpn-lxc
-    systemctl start clever-vpn-lxc
-    log_info "Go API service started on :8080"
+    log_info "Adding Manager certificate to trust store..."
+    lxc config trust add "$MANAGER_CERT" 2>/dev/null || true
+    log_info "Manager certificate trust ensured"
 }
 
 # ==================== 主流程 ====================
@@ -257,10 +267,22 @@ main() {
     echo "============================================"
     echo ""
 
-    if [[ "${1:-}" == "--rebuild" ]]; then
-        log_warn "Rebuilding base image..."
-        lxc image delete "$BASE_IMAGE_ALIAS" 2>/dev/null || true
-    fi
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --rebuild)
+                log_warn "Rebuilding base image..."
+                lxc image delete "$BASE_IMAGE_ALIAS" 2>/dev/null || true
+                ;;
+            --manager-cert)
+                MANAGER_CERT="$2"
+                shift
+                ;;
+            --manager-cert=*)
+                MANAGER_CERT="${1#*=}"
+                ;;
+        esac
+        shift
+    done
 
     check_root
     check_ubuntu
@@ -270,9 +292,10 @@ main() {
     setup_network
     setup_ufw
     setup_kernel_config
+    setup_lxd_remote
+    setup_ufw_allow_lxd_api
     build_base_image
     setup_iptables_persist
-    install_go_api
 
     echo ""
     echo "============================================"
