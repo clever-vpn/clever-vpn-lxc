@@ -79,6 +79,26 @@ jobs:
 
           echo "LXC_MANAGER_VERSION=${RESOLVED}" >> "${GITHUB_ENV}"
 
+      - name: Verify release assets accessible
+        if: inputs.action == 'deploy'
+        run: |
+          TAG="${LXC_MANAGER_VERSION}"
+          BASE="https://github.com/clever-vpn/clever-vpn-lxc/releases/download/${TAG}"
+          ASSET="lxc-manager-amd64-${TAG}.gz"
+
+          echo "Waiting for CDN propagation of ${ASSET}..."
+          for i in $(seq 1 12); do
+            HTTP_CODE=$(curl -sLo /dev/null -w "%{http_code}" "${BASE}/${ASSET}")
+            if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "302" ]; then
+              echo "Asset available (HTTP $HTTP_CODE) on attempt $i"
+              exit 0
+            fi
+            echo "Attempt $i: HTTP $HTTP_CODE, retrying in 10s..."
+            sleep 10
+          done
+          echo "ERROR: asset not available after 2 minutes"
+          exit 1
+
       - name: Clean up stale Cloudflare DNS records
         if: inputs.action == 'deploy'
         env:
