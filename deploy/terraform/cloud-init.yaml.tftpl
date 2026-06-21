@@ -9,6 +9,7 @@ package_upgrade: true
 packages:
   - curl
   - gzip
+  - jq
 
 write_files:
   # lxc-manager config
@@ -44,7 +45,7 @@ runcmd:
   - ufw allow 443/tcp
   - ufw --force enable
 
-  # ============ Phase 2: Download binary (retry, abort on final failure) ============
+  # ============ Phase 2: Download via GitHub API (bypasses release CDN delay) ============
   - |
     set -e
     ARCH=$(uname -m)
@@ -55,24 +56,24 @@ runcmd:
     esac
 
     TAG="${lxc_manager_version}"
-    BASE="https://github.com/clever-vpn/clever-vpn-lxc/releases/download/$TAG"
+    REPO="clever-vpn/clever-vpn-lxc"
+    API="https://api.github.com/repos/$REPO/releases/tags/$TAG"
+
+    echo "Resolving download URLs via GitHub API..."
+    DL_URL=$(curl -sS "$API" | jq -r '.assets[] | select(.name | startswith("lxc-manager-'"$GOARCH"'-") and endswith(".gz")) | .browser_download_url')
+    SHA_URL=$(curl -sS "$API" | jq -r '.assets[] | select(.name | startswith("lxc-manager-'"$GOARCH"'-") and endswith(".sha256")) | .browser_download_url')
+
+    if [ -z "$DL_URL" ] || [ "$DL_URL" = "null" ]; then
+      echo "ERROR: could not find release asset for $GOARCH"
+      exit 1
+    fi
+
+    cd /tmp
     ASSET="lxc-manager-$GOARCH-$TAG.gz"
     SHA="$ASSET.sha256"
 
-    cd /tmp
-    for i in $(seq 1 10); do
-      if curl -fsSLo "$SHA" "$BASE/$SHA" && curl -fsSLo "$ASSET" "$BASE/$ASSET"; then
-        echo "Download succeeded on attempt $i"
-        break
-      fi
-      echo "Download attempt $i failed, retrying in 30s..."
-      sleep 30
-    done
-
-    if [ ! -f "$ASSET" ] || [ ! -f "$SHA" ]; then
-      echo "ERROR: download failed after 10 attempts"
-      exit 1
-    fi
+    curl -fsSLo "$SHA" "$SHA_URL"
+    curl -fsSLo "$ASSET" "$DL_URL"
 
     EXPECTED=$(awk '{print $1}' "$SHA")
     ACTUAL=$(sha256sum "$ASSET" | awk '{print $1}')

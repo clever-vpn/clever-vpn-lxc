@@ -20,15 +20,30 @@ func cmdInstall() {
 	for i := 2; i < len(os.Args); i++ {
 		switch os.Args[i] {
 		case "--domain":
-			if i+1 < len(os.Args) { domain = os.Args[i+1]; i++ }
+			if i+1 < len(os.Args) {
+				domain = os.Args[i+1]
+				i++
+			}
 		case "--tls-cert":
-			if i+1 < len(os.Args) { tlsCert = os.Args[i+1]; i++ }
+			if i+1 < len(os.Args) {
+				tlsCert = os.Args[i+1]
+				i++
+			}
 		case "--tls-key":
-			if i+1 < len(os.Args) { tlsKey = os.Args[i+1]; i++ }
+			if i+1 < len(os.Args) {
+				tlsKey = os.Args[i+1]
+				i++
+			}
 		case "--port":
-			if i+1 < len(os.Args) { port = os.Args[i+1]; i++ }
+			if i+1 < len(os.Args) {
+				port = os.Args[i+1]
+				i++
+			}
 		case "--config":
-			if i+1 < len(os.Args) { configPath = os.Args[i+1]; i++ }
+			if i+1 < len(os.Args) {
+				configPath = os.Args[i+1]
+				i++
+			}
 		}
 	}
 
@@ -100,7 +115,9 @@ func cmdCert() {
 		os.Exit(1)
 	}
 	outDir := "."
-	if len(os.Args) > 3 { outDir = os.Args[3] }
+	if len(os.Args) > 3 {
+		outDir = os.Args[3]
+	}
 
 	keyPath := filepath.Join(outDir, "client.key")
 	crtPath := filepath.Join(outDir, "client.crt")
@@ -126,7 +143,9 @@ func cmdAdmin() {
 		os.Exit(1)
 	}
 	name := "admin"
-	if len(os.Args) > 3 { name = os.Args[3] }
+	if len(os.Args) > 3 {
+		name = os.Args[3]
+	}
 
 	loadAdminTokens()
 	token, err := addAdminToken(name)
