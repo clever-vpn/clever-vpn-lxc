@@ -19,14 +19,15 @@ import (
 // ==================== Node Registry ====================
 
 type NodeRecord struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Region  string `json:"region"`
-	URL     string `json:"url"`
-	Network string `json:"network"`
-	SSHHost string `json:"sshHost"`
-	SSHPort int    `json:"sshPort"`
-	Image   string `json:"image"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Region      string `json:"region"`
+	URL         string `json:"url"`
+	Network     string `json:"network"`
+	SSHHost     string `json:"sshHost"`
+	SSHPort     int    `json:"sshPort"`
+	SSHPassword string `json:"sshPassword"`
+	Image       string `json:"image"`
 }
 
 var (
@@ -333,14 +334,15 @@ func provisionNode(name, region, host string, port int, password string) (*NodeR
 	img := env("LXC_BASE_IMAGE", "clever-vpn-base")
 
 	rec := &NodeRecord{
-		ID:      generateNodeID(),
-		Name:    name,
-		Region:  region,
-		URL:     fmt.Sprintf("https://%s:8443", host),
-		Network: net,
-		SSHHost: host,
-		SSHPort: port,
-		Image:   img,
+		ID:          generateNodeID(),
+		Name:        name,
+		Region:      region,
+		URL:         fmt.Sprintf("https://%s:8443", host),
+		Network:     net,
+		SSHHost:     host,
+		SSHPort:     port,
+		SSHPassword: password,
+		Image:       img,
 	}
 	return rec, nil
 }
