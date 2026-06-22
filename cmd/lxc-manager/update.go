@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -65,6 +66,7 @@ func buildAssetName(baseName, tag, arch string) (gzName, shaName string) {
 
 // doUpdate downloads and applies the specified release tag for the current
 // architecture. Only one update may run at a time; concurrent calls return an error.
+// If tag is "latest", it resolves to the actual latest release tag via GitHub API.
 func doUpdate(tag string) error {
 	if !updateMu.TryLock() {
 		return fmt.Errorf("update already in progress, please try again later")
@@ -72,6 +74,22 @@ func doUpdate(tag string) error {
 	defer updateMu.Unlock()
 
 	arch := detectArch()
+
+	// Resolve "latest" to actual tag via GitHub API
+	if tag == "latest" {
+		resolved, err := resolveLatestTag()
+		if err != nil {
+			return fmt.Errorf("failed to resolve latest tag: %w", err)
+		}
+		tag = resolved
+		fmt.Printf("Latest release: %s\n", tag)
+	}
+
+	// Skip if already running the target version
+	if version == tag {
+		fmt.Printf("Already up to date (%s).\n", tag)
+		return nil
+	}
 
 	// Build GitHub release download URLs
 	baseURL := fmt.Sprintf("https://github.com/%s/%s/releases/download/%s",
@@ -162,4 +180,29 @@ func getSha256FromURL(url string) ([]byte, error) {
 		return nil, fmt.Errorf("invalid checksum hex: %w", err)
 	}
 	return checksum, nil
+}
+
+// resolveLatestTag queries the GitHub API for the latest release tag name.
+func resolveLatestTag() (string, error) {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", githubOwner, githubRepo)
+	resp, err := http.Get(url)
+	if err != nil {
+		return "", fmt.Errorf("GitHub API request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("GitHub API returned HTTP %s", resp.Status)
+	}
+
+	var release struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		return "", fmt.Errorf("failed to parse GitHub API response: %w", err)
+	}
+	if release.TagName == "" {
+		return "", fmt.Errorf("no tag_name in GitHub API response")
+	}
+	return release.TagName, nil
 }
