@@ -23,6 +23,7 @@ locals {
     lxc_manager_version   = var.lxc_manager_version
     ssh_public_key        = var.ssh_public_key
     admin_password_hash   = var.admin_password_hash
+    cloudflare_api_token  = var.cloudflare_api_token
     r2_endpoint           = local.r2_endpoint
     r2_bucket             = var.r2_bucket
     r2_access_key_id      = var.r2_access_key_id
