@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -694,11 +695,8 @@ func handleAdminCreateContainer(w http.ResponseWriter, r *http.Request) {
 		Node:        nodeID,
 	}
 
-	password := ""
-	if strings.TrimSpace(req.UserData) == "" {
-		password = genPasswd()
-		rec.Password = password
-	}
+	password := genPasswd()
+	rec.Password = password
 
 	if err := registerInstance(name, rec); err != nil {
 		jsonError(w, fmt.Sprintf("register: %v", err), 500)
@@ -741,14 +739,12 @@ func handleAdminCreateContainer(w http.ResponseWriter, r *http.Request) {
 	resp := CreateResp{
 		Status:   "creating",
 		Name:     name,
+		Password: password,
 		Ports:    ports,
 		CPU:      req.CPU,
 		Mem:      req.Mem,
 		Disk:     req.Disk,
 		NodeID:   nodeID,
-	}
-	if password != "" {
-		resp.Password = password
 	}
 	jsonOK(w, resp)
 
@@ -765,10 +761,16 @@ func handleAdminListContainers(w http.ResponseWriter, r *http.Request) {
 		if filterUserID != "" && rec.UserID != filterUserID {
 			continue
 		}
+		userName := ""
+		if ur, ok := getUserByID(rec.UserID); ok {
+			userName = ur.Name
+		}
 		result = append(result, map[string]interface{}{
 			"name":        name,
 			"userID":      rec.UserID,
-			"status":      "unknown", // filled below if available
+			"userName":    userName,
+			"password":    rec.Password,
+			"status":      "unknown",
 			"cpu":         rec.CPU,
 			"mem":         rec.Mem,
 			"disk":        rec.Disk,
@@ -779,6 +781,12 @@ func handleAdminListContainers(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	instMu.Unlock()
+
+	// Sort by created time descending
+	sort.Slice(result, func(i, j int) bool {
+		return result[i]["created"].(string) > result[j]["created"].(string)
+	})
+
 	jsonOK(w, result)
 }
 
