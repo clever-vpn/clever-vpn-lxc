@@ -55,6 +55,17 @@ type ResizeReq struct {
 	Mem  int `json:"mem"`
 	Disk int `json:"disk"`
 }
+
+type AdminCreateContainerReq struct {
+	UserID      string `json:"userID"`
+	CPU         int    `json:"cpu"`
+	Mem         int    `json:"mem"`
+	Disk        int    `json:"disk"`
+	ServicePort int    `json:"servicePort"`
+	UserData    string `json:"userData"`
+	Region      string `json:"region"`
+}
+
 type APIError struct {
 	Error string `json:"error"`
 }
@@ -614,6 +625,229 @@ func handleResize(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]interface{}{"status": "resized", "cpu": rec.CPU, "mem": rec.Mem, "disk": rec.Disk})
 }
 
+// ==================== Admin Container Handlers ====================
+
+// handleAdminCreateContainer creates a container on behalf of a user.
+func handleAdminCreateContainer(w http.ResponseWriter, r *http.Request) {
+	var req AdminCreateContainerReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid body", 400)
+		return
+	}
+	if req.UserID == "" {
+		jsonError(w, "userID required", 400)
+		return
+	}
+	if req.ServicePort <= 0 || req.ServicePort > 65535 {
+		jsonError(w, "servicePort required (1-65535)", 400)
+		return
+	}
+	if req.CPU <= 0 {
+		req.CPU = 1
+	}
+	if req.Mem <= 0 {
+		req.Mem = 512
+	}
+
+	// Verify user exists
+	userRec, ok := getUserByID(req.UserID)
+	if !ok {
+		jsonError(w, "user not found", 404)
+		return
+	}
+
+	var cli *lxc.Client
+	var nodeID string
+	region := req.Region
+
+	if region != "" {
+		var err error
+		nodeID, cli, err = pickNode(region)
+		if err != nil {
+			jsonError(w, fmt.Sprintf("region %s: %v", region, err), 400)
+			return
+		}
+	} else {
+		var err error
+		cli, err = getDefaultClient()
+		if err != nil {
+			jsonError(w, "no nodes available", 400)
+			return
+		}
+	}
+	if cli == nil {
+		jsonError(w, "no nodes available", 400)
+		return
+	}
+
+	name := env("LXC_NAME_PREFIX", "user-") + generateUUID()
+	img := env("LXC_BASE_IMAGE", "clever-vpn-base")
+	net := env("LXC_NETWORK", "vpnbr0")
+
+	rec := &InstanceRecord{
+		CPU:         req.CPU,
+		Mem:         req.Mem,
+		Disk:        req.Disk,
+		ServicePort: req.ServicePort,
+		UserID:      req.UserID,
+		Token:       getBearerToken(r),
+		Node:        nodeID,
+	}
+
+	password := ""
+	if strings.TrimSpace(req.UserData) == "" {
+		password = genPasswd()
+		rec.Password = password
+	}
+
+	if err := registerInstance(name, rec); err != nil {
+		jsonError(w, fmt.Sprintf("register: %v", err), 500)
+		return
+	}
+
+	ports := PortInfo{SSH: rec.SSHExtPort, Service: rec.ServiceExtPort}
+	log.Printf("[Admin] Creating %s for user %s (region=%s node=%s cpu=%d mem=%dMB disk=%dGB)",
+		name, req.UserID, region, nodeID, req.CPU, req.Mem, req.Disk)
+
+	userData := mergeUserData(req.UserData, name, bootstrapEnv(name, req.CPU, req.Mem, req.Disk, ports), password)
+	if err := cli.CreateContainer(name, img, net, req.CPU, req.Mem, req.Disk, map[string]string{"cloud-init.user-data": userData}); err != nil {
+		unregisterInstance(name)
+		jsonError(w, fmt.Sprintf("create: %v", err), 500)
+		return
+	}
+	if err := cli.StartContainer(name); err != nil {
+		unregisterInstance(name)
+		jsonError(w, fmt.Sprintf("start: %v", err), 500)
+		return
+	}
+	vip, err := cli.InstanceIPv4(name, 30*time.Second)
+	if err != nil {
+		unregisterInstance(name)
+		jsonError(w, fmt.Sprintf("get ip: %v", err), 500)
+		return
+	}
+	if err := addPortForward(ports.SSH, vip, 22); err != nil {
+		unregisterInstance(name)
+		jsonError(w, fmt.Sprintf("forward ssh: %v", err), 500)
+		return
+	}
+	if err := addPortForward(ports.Service, vip, req.ServicePort); err != nil {
+		delPortForward(ports.SSH, vip, 22)
+		unregisterInstance(name)
+		jsonError(w, fmt.Sprintf("forward svc: %v", err), 500)
+		return
+	}
+
+	resp := CreateResp{
+		Status:   "creating",
+		Name:     name,
+		Ports:    ports,
+		CPU:      req.CPU,
+		Mem:      req.Mem,
+		Disk:     req.Disk,
+		NodeID:   nodeID,
+	}
+	if password != "" {
+		resp.Password = password
+	}
+	jsonOK(w, resp)
+
+	_ = userRec // user exists, verified above
+}
+
+// handleAdminListContainers lists all containers, optionally filtered by ?userID=xxx.
+func handleAdminListContainers(w http.ResponseWriter, r *http.Request) {
+	filterUserID := r.URL.Query().Get("userID")
+
+	instMu.Lock()
+	var result []map[string]interface{}
+	for name, rec := range instances {
+		if filterUserID != "" && rec.UserID != filterUserID {
+			continue
+		}
+		result = append(result, map[string]interface{}{
+			"name":        name,
+			"userID":      rec.UserID,
+			"status":      "unknown", // filled below if available
+			"cpu":         rec.CPU,
+			"mem":         rec.Mem,
+			"disk":        rec.Disk,
+			"servicePort": rec.ServicePort,
+			"node":        rec.Node,
+			"ports":       map[string]int{"ssh": rec.SSHExtPort, "service": rec.ServiceExtPort},
+			"created":     rec.Created.Format(time.RFC3339),
+		})
+	}
+	instMu.Unlock()
+	jsonOK(w, result)
+}
+
+// handleAdminDeleteContainer allows admin to delete any container.
+func handleAdminDeleteContainer(w http.ResponseWriter, r *http.Request) {
+	name := stripPrefix(r.URL.Path, "/api/admin/containers/")
+	if name == "" || strings.Contains(name, "/") {
+		jsonError(w, "name required", 400)
+		return
+	}
+
+	instMu.Lock()
+	_, exists := instances[name]
+	instMu.Unlock()
+	if !exists {
+		jsonError(w, "not found", 404)
+		return
+	}
+
+	log.Printf("[Admin] Deleting container %s", name)
+	destroyContainer(name)
+	jsonOK(w, map[string]string{"status": "deleted"})
+}
+
+// handleAdminResizeContainer allows admin to resize any container.
+func handleAdminResizeContainer(w http.ResponseWriter, r *http.Request) {
+	name := stripPrefix(strings.TrimSuffix(r.URL.Path, "/resize"), "/api/admin/containers/")
+	if name == "" {
+		jsonError(w, "name required", 400)
+		return
+	}
+
+	var req ResizeReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid body", 400)
+		return
+	}
+	if req.CPU <= 0 && req.Mem <= 0 && req.Disk <= 0 {
+		jsonError(w, "cpu, mem, or disk required", 400)
+		return
+	}
+
+	instMu.Lock()
+	rec, exists := instances[name]
+	if !exists {
+		instMu.Unlock()
+		jsonError(w, "not found", 404)
+		return
+	}
+	if req.CPU > 0 {
+		rec.CPU = req.CPU
+	}
+	if req.Mem > 0 {
+		rec.Mem = req.Mem
+	}
+	if req.Disk > 0 {
+		rec.Disk = req.Disk
+	}
+	saveInstances()
+	instMu.Unlock()
+
+	log.Printf("[Admin] Resizing container %s: cpu=%d mem=%d disk=%d", name, rec.CPU, rec.Mem, rec.Disk)
+	if err := clientForInstance(name).ResizeContainer(name, rec.CPU, rec.Mem, rec.Disk); err != nil {
+		jsonError(w, fmt.Sprintf("resize: %v", err), 500)
+		return
+	}
+	jsonOK(w, map[string]interface{}{"status": "resized", "cpu": rec.CPU, "mem": rec.Mem, "disk": rec.Disk})
+}
+
 // ==================== Node Handlers ====================
 
 func handleNodeAdd(w http.ResponseWriter, r *http.Request) {
@@ -925,6 +1159,31 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		handleUserRename(w, r)
+	// Admin containers (admin auth, operate on all containers)
+	case p == "/api/admin/containers" && r.Method == "POST":
+		if !validateAdmin(r) {
+			jsonError(w, "unauthorized", 401)
+			return
+		}
+		handleAdminCreateContainer(w, r)
+	case p == "/api/admin/containers" && r.Method == "GET":
+		if !validateAdmin(r) {
+			jsonError(w, "unauthorized", 401)
+			return
+		}
+		handleAdminListContainers(w, r)
+	case strings.HasPrefix(p, "/api/admin/containers/") && strings.HasSuffix(p, "/resize") && r.Method == "PUT":
+		if !validateAdmin(r) {
+			jsonError(w, "unauthorized", 401)
+			return
+		}
+		handleAdminResizeContainer(w, r)
+	case strings.HasPrefix(p, "/api/admin/containers/") && r.Method == "DELETE":
+		if !validateAdmin(r) {
+			jsonError(w, "unauthorized", 401)
+			return
+		}
+		handleAdminDeleteContainer(w, r)
 	// Containers (user auth, scoped by token)
 	case p == "/api/containers" && r.Method == "POST":
 		handleCreate(w, r)
