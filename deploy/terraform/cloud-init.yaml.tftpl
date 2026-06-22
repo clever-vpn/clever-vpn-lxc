@@ -96,7 +96,7 @@ runcmd:
     lxc-manager install --config /etc/lxc-manager/config.json --domain ${fqdn}
 
     mkdir -p /etc/systemd/system/lxc-manager.service.d
-    printf '[Service]\nEnvironment="LXD_CLIENT_CERT=/etc/lxc-manager/client.crt"\nEnvironment="LXD_CLIENT_KEY=/etc/lxc-manager/client.key"\n' > /etc/systemd/system/lxc-manager.service.d/override.conf
+    printf '[Service]\nEnvironment="LXD_CLIENT_CERT=/etc/lxc-manager/client.crt"\nEnvironment="LXD_CLIENT_KEY=/etc/lxc-manager/client.key"\nEnvironment="CF_DNS_API_TOKEN=${cloudflare_api_token}"\n' > /etc/systemd/system/lxc-manager.service.d/override.conf
     systemctl daemon-reload
     systemctl restart lxc-manager
     echo "lxc-manager service started"

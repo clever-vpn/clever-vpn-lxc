@@ -2,8 +2,8 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,8 +16,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/caddyserver/certmagic"
 	"github.com/clever-vpn/clever-vpn-lxc/lxc"
-	"golang.org/x/crypto/acme/autocert"
+	"github.com/libdns/cloudflare"
 )
 
 var lxdClient *lxc.Client
@@ -972,36 +973,51 @@ func cmdServe() {
 	})
 
 	if domain != "" {
-		// autocert mode
+		// DNS-01 mode via certmagic + Cloudflare
 		certDir := filepathJoin(ensureDataDir(), "certs")
 		os.MkdirAll(certDir, 0700)
 
-		m := &autocert.Manager{
-			Prompt:     autocert.AcceptTOS,
-			HostPolicy: autocert.HostWhitelist(domain),
-			Cache:      autocert.DirCache(certDir),
+		cfToken := os.Getenv("CF_DNS_API_TOKEN")
+		if cfToken == "" {
+			log.Fatal("CF_DNS_API_TOKEN env var is required for DNS-01 certificate issuance")
+		}
+
+		cfg := certmagic.NewDefault()
+		cfg.Storage = &certmagic.FileStorage{Path: certDir}
+
+		issuer := certmagic.NewACMEIssuer(cfg, certmagic.ACMEIssuer{
+			CA:     certmagic.LetsEncryptProductionCA,
+			Email:  "",
+			Agreed: true,
+			DNS01Solver: &certmagic.DNS01Solver{
+				DNSManager: certmagic.DNSManager{
+					DNSProvider: &cloudflare.Provider{APIToken: cfToken},
+				},
+			},
+		})
+		cfg.Issuers = []certmagic.Issuer{issuer}
+
+		// Obtain certificate (blocks until ready)
+		ctx := context.Background()
+		if err := cfg.ManageSync(ctx, []string{domain}); err != nil {
+			log.Fatalf("certmagic manage: %v", err)
 		}
 
 		srv := &http.Server{
 			Addr:      ":443",
-			TLSConfig: &tls.Config{GetCertificate: m.GetCertificate},
+			TLSConfig: cfg.TLSConfig(),
 		}
 
-		log.Printf("LXC Manager on https://%s (autocert)", domain)
+		log.Printf("LXC Manager on https://%s (DNS-01 via certmagic)", domain)
 		go func() {
 			log.Fatal(srv.ListenAndServeTLS("", ""))
 		}()
 
-		// HTTP → HTTPS redirect, except ACME challenges
-		acmeHandler := m.HTTPHandler(nil)
+		// HTTP → HTTPS redirect (no ACME challenge needed with DNS-01)
 		go func() {
 			redirector := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if strings.HasPrefix(r.URL.Path, "/.well-known/acme-challenge/") {
-					acmeHandler.ServeHTTP(w, r)
-				} else {
-					target := "https://" + r.Host + r.URL.RequestURI()
-					http.Redirect(w, r, target, http.StatusMovedPermanently)
-				}
+				target := "https://" + r.Host + r.URL.RequestURI()
+				http.Redirect(w, r, target, http.StatusMovedPermanently)
 			})
 			log.Fatal(http.ListenAndServe(":80", redirector))
 		}()
