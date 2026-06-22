@@ -986,7 +986,7 @@ func cmdServe() {
 		cfg.Storage = &certmagic.FileStorage{Path: certDir}
 
 		issuer := certmagic.NewACMEIssuer(cfg, certmagic.ACMEIssuer{
-			CA:     certmagic.LetsEncryptProductionCA,
+			CA:     certmagic.LetsEncryptStagingCA,
 			Email:  "",
 			Agreed: true,
 			DNS01Solver: &certmagic.DNS01Solver{
