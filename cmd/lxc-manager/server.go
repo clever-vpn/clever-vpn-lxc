@@ -1093,6 +1093,26 @@ func handleRegions(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, regions)
 }
 
+// corsHandler adds CORS headers for *.clever-clouds.com origins.
+func corsHandler(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if strings.HasSuffix(origin, ".clever-clouds.com") || origin == "https://clever-clouds.com" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			w.Header().Set("Access-Control-Max-Age", "86400")
+		}
+
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(204)
+			return
+		}
+
+		next(w, r)
+	}
+}
+
 func handler(w http.ResponseWriter, r *http.Request) {
 	p := r.URL.Path
 	switch {
@@ -1234,7 +1254,7 @@ func cmdServe() {
 	tlsKey := cfg.TLSKey
 	port := cfg.Port
 
-	http.HandleFunc("/api/", handler)
+	http.HandleFunc("/api/", corsHandler(handler))
 	http.HandleFunc("/_version", func(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, map[string]string{"version": version})
 	})
