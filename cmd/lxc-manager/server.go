@@ -210,6 +210,25 @@ func unregisterInstance(name string) {
 
 // ==================== DNAT ====================
 
+// addPortForwardOnNode adds DNAT rules on the appropriate host.
+// Uses local iptables when nodeID is empty, or SSH to the remote node otherwise.
+func addPortForwardOnNode(nodeID string, extPort int, dstIP string, dstPort int) error {
+	if nodeID != "" {
+		return addNodePortForward(nodeID, extPort, dstIP, dstPort)
+	}
+	return addPortForward(extPort, dstIP, dstPort)
+}
+
+// delPortForwardOnNode removes DNAT rules on the appropriate host.
+func delPortForwardOnNode(nodeID string, extPort int, dstIP string, dstPort int) {
+	if nodeID != "" {
+		delNodePortForward(nodeID, extPort, dstIP, dstPort)
+		return
+	}
+	delPortForward(extPort, dstIP, dstPort)
+}
+
+// addPortForward adds DNAT rules on the local host via iptables.
 func addPortForward(extPort int, ip string, intPort int) error {
 	for _, proto := range []string{"tcp", "udp"} {
 		for _, chain := range []string{"PREROUTING", "OUTPUT"} {
@@ -355,11 +374,11 @@ func recoverInstances() {
 			continue
 		}
 
-		if err := addPortForward(rec.SSHExtPort, vip, 22); err != nil {
+		if err := addPortForwardOnNode(rec.Node, rec.SSHExtPort, vip, 22); err != nil {
 			log.Printf("  %s: forward ssh %d: %v", name, rec.SSHExtPort, err)
 			continue
 		}
-		if err := addPortForward(rec.ServiceExtPort, vip, rec.ServicePort); err != nil {
+		if err := addPortForwardOnNode(rec.Node, rec.ServiceExtPort, vip, rec.ServicePort); err != nil {
 			log.Printf("  %s: forward svc %d: %v", name, rec.ServiceExtPort, err)
 			continue
 		}
@@ -499,13 +518,13 @@ func handleCreate(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, fmt.Sprintf("get ip: %v", err), 500)
 		return
 	}
-	if err := addPortForward(ports.SSH, vip, 22); err != nil {
+	if err := addPortForwardOnNode(nodeID, ports.SSH, vip, 22); err != nil {
 		unregisterInstance(name)
 		jsonError(w, fmt.Sprintf("forward ssh: %v", err), 500)
 		return
 	}
-	if err := addPortForward(ports.Service, vip, req.ServicePort); err != nil {
-		delPortForward(ports.SSH, vip, 22)
+	if err := addPortForwardOnNode(nodeID, ports.Service, vip, req.ServicePort); err != nil {
+		delPortForwardOnNode(nodeID, ports.SSH, vip, 22)
 		unregisterInstance(name)
 		jsonError(w, fmt.Sprintf("forward svc: %v", err), 500)
 		return
@@ -677,8 +696,8 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 
 	vip, _ := cli.InstanceIPv4(name, 5*time.Second)
 	if vip != "" {
-		delPortForward(rec.SSHExtPort, vip, 22)
-		delPortForward(rec.ServiceExtPort, vip, rec.ServicePort)
+		delPortForwardOnNode(rec.Node, rec.SSHExtPort, vip, 22)
+		delPortForwardOnNode(rec.Node, rec.ServiceExtPort, vip, rec.ServicePort)
 	}
 	unregisterInstance(name)
 
@@ -1016,13 +1035,13 @@ func handleAdminCreateContainer(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, fmt.Sprintf("get ip: %v", err), 500)
 		return
 	}
-	if err := addPortForward(ports.SSH, vip, 22); err != nil {
+	if err := addPortForwardOnNode(nodeID, ports.SSH, vip, 22); err != nil {
 		unregisterInstance(name)
 		jsonError(w, fmt.Sprintf("forward ssh: %v", err), 500)
 		return
 	}
-	if err := addPortForward(ports.Service, vip, req.ServicePort); err != nil {
-		delPortForward(ports.SSH, vip, 22)
+	if err := addPortForwardOnNode(nodeID, ports.Service, vip, req.ServicePort); err != nil {
+		delPortForwardOnNode(nodeID, ports.SSH, vip, 22)
 		unregisterInstance(name)
 		jsonError(w, fmt.Sprintf("forward svc: %v", err), 500)
 		return
@@ -1423,8 +1442,8 @@ func destroyContainer(name string) {
 	rec, ok := instances[name]
 	instMu.Unlock()
 	if ok && vip != "" {
-		delPortForward(rec.SSHExtPort, vip, 22)
-		delPortForward(rec.ServiceExtPort, vip, rec.ServicePort)
+		delPortForwardOnNode(rec.Node, rec.SSHExtPort, vip, 22)
+		delPortForwardOnNode(rec.Node, rec.ServiceExtPort, vip, rec.ServicePort)
 	}
 
 	if !strings.EqualFold(container.Status, "Stopped") {
