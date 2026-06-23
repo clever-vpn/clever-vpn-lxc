@@ -17,26 +17,40 @@ func main() {
 		fmt.Println(version)
 		os.Exit(0)
 	}
-	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: lxc-manager <command> [args]\n")
-		fmt.Fprintf(os.Stderr, "Commands:\n")
-		fmt.Fprintf(os.Stderr, "  serve          Start HTTP API server\n")
-		fmt.Fprintf(os.Stderr, "  install        Install as systemd service\n")
-		fmt.Fprintf(os.Stderr, "  uninstall      Remove systemd service\n")
-		fmt.Fprintf(os.Stderr, "  cert gen       Generate TLS client cert\n")
-		fmt.Fprintf(os.Stderr, "  admin create   Create admin token\n")
-		fmt.Fprintf(os.Stderr, "  add-node       Provision a LXD node via SSH\n")
-		fmt.Fprintf(os.Stderr, "  remove-node    Remove a node\n")
-		fmt.Fprintf(os.Stderr, "  list-nodes     List all nodes\n")
-		fmt.Fprintf(os.Stderr, "  add-user       Create user token\n")
-		fmt.Fprintf(os.Stderr, "  remove-user    Delete user\n")
-		fmt.Fprintf(os.Stderr, "  reset-user-token Reset user token\n")
-		fmt.Fprintf(os.Stderr, "  rename-user    Rename a user\n")
-		fmt.Fprintf(os.Stderr, "  list-users     List users with container counts\n")
-		fmt.Fprintf(os.Stderr, "  backup         Sync data to R2/S3\n")
-		fmt.Fprintf(os.Stderr, "  restore        Restore data from R2/S3\n")
-		fmt.Fprintf(os.Stderr, "  version        Print version\n")
-		fmt.Fprintf(os.Stderr, "  update         Self-update from GitHub releases (--tag v1.0.0)\n")
+	if len(os.Args) < 2 || os.Args[1] == "help" || os.Args[1] == "--help" || os.Args[1] == "-h" {
+		fmt.Fprintf(os.Stderr, `lxc-manager — Clever VPN LXC Manager
+
+Usage: lxc-manager <command> [args]
+
+Server Management:
+  serve                 Start the API server
+  install               Install as systemd service (--domain, --config)
+  uninstall             Remove systemd service
+  version               Print version
+  update                Self-update from GitHub releases (--tag v1.0.0)
+
+Certificate:
+  cert gen              Generate LXD TLS client certificate
+
+Node Management:
+  add-node              Provision a new LXD host via SSH
+  remove-node <id>      Remove a node
+  list-nodes            List all registered nodes
+
+User Management:
+  add-user              Create a new user
+  remove-user <id|name> Delete a user and all their containers
+  list-users            List all users with container counts
+  rename-user <id|name> Change a user's display name
+  reset-user-token <id> Generate a new token for a user
+
+Admin Authentication:
+  admin create          Create admin credentials
+
+Backup & Restore:
+  backup                Sync data to R2/S3
+  restore               Download data from R2/S3
+`)
 		os.Exit(1)
 	}
 

@@ -95,6 +95,10 @@ runcmd:
     set -e
     mkdir -p /etc/lxc-manager /var/lib/clever-vpn-lxc
     lxc-manager cert gen /etc/lxc-manager
+
+    # Restore state from R2 (skip if nothing to restore)
+    lxc-manager restore 2>/dev/null || echo "No backup data to restore (this is normal for first deploy)"
+
     lxc-manager install --config /etc/lxc-manager/config.json --domain ${fqdn}
 
     mkdir -p /etc/systemd/system/lxc-manager.service.d
