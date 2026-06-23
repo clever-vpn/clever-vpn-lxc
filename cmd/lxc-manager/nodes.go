@@ -388,7 +388,7 @@ func provisionNode(name, region, host string, port int, password string, poolSiz
 	}
 	log.Printf("  uploaded client.crt")
 
-	out, err = sshExec(client, "lxc config trust add /tmp/manager-client.crt 2>/dev/null || true && rm -f /tmp/manager-client.crt")
+	out, err = sshExec(client, "lxc config trust add /tmp/manager-client.crt --type=client --restricted=false 2>/dev/null || true && rm -f /tmp/manager-client.crt")
 	if err != nil {
 		return nil, fmt.Errorf("trust cert: %w\n%s", err, out)
 	}

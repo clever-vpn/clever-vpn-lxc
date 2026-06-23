@@ -267,7 +267,7 @@ setup_lxd_remote() {
     lxc config set core.https_address :8443 2>/dev/null || true
 
     log_info "Adding Manager certificate to trust store..."
-    lxc config trust add "$MANAGER_CERT" 2>/dev/null || true
+    lxc config trust add "$MANAGER_CERT" --type=client --restricted=false 2>/dev/null || true
     log_info "Manager certificate trust ensured"
 }
 
