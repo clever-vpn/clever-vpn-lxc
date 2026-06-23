@@ -136,15 +136,21 @@ func TestRegions(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
-	var regions []string
+	var regions []RegionInfo
 	json.Unmarshal(w.Body.Bytes(), &regions)
 
 	seen := map[string]bool{}
 	for _, r := range regions {
-		seen[r] = true
+		seen[r.ID] = true
 	}
 	if !seen["tokyo"] || !seen["ewr"] {
 		t.Fatalf("expected tokyo and ewr in regions, got %v", regions)
+	}
+	// Verify metadata is populated for known regions
+	for _, r := range regions {
+		if r.City == "" || r.Country == "" {
+			t.Fatalf("region %s missing city/country: city=%q country=%q", r.ID, r.City, r.Country)
+		}
 	}
 }
 

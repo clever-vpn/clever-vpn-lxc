@@ -499,10 +499,14 @@ func handleList(w http.ResponseWriter, r *http.Request) {
 		ownedSet[n] = true
 	}
 
-	var result []lxc.Container
+	var result []map[string]interface{}
 	for _, c := range all {
 		if ownedSet[c.Name] {
-			result = append(result, c)
+			data, _ := json.Marshal(c)
+			var entry map[string]interface{}
+			json.Unmarshal(data, &entry)
+			entry["terminalUrl"] = fmt.Sprintf("https://%s/terminal/%s", cfg.Domain, c.Name)
+			result = append(result, entry)
 		}
 	}
 	jsonOK(w, result)
@@ -534,7 +538,13 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, fmt.Sprintf("get: %v", err), 404)
 		return
 	}
-	jsonOK(w, c)
+
+	// Wrap with terminalUrl
+	data, _ := json.Marshal(c)
+	var resp map[string]interface{}
+	json.Unmarshal(data, &resp)
+	resp["terminalUrl"] = fmt.Sprintf("https://%s/terminal/%s", cfg.Domain, name)
+	jsonOK(w, resp)
 }
 
 func handleDelete(w http.ResponseWriter, r *http.Request) {
@@ -579,6 +589,90 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, map[string]string{"status": "deleted"})
+}
+
+func handleStart(w http.ResponseWriter, r *http.Request) {
+	name := stripPrefix(strings.TrimSuffix(r.URL.Path, "/start"), "/api/containers/")
+
+	ok, userID := validateUser(r)
+	if !ok {
+		jsonError(w, "unauthorized", 401)
+		return
+	}
+
+	instMu.Lock()
+	rec, exists := instances[name]
+	instMu.Unlock()
+	if !exists || rec.UserID != userID {
+		jsonError(w, "not found", 404)
+		return
+	}
+
+	cli := clientForInstance(name)
+	if err := cli.StartContainer(name); err != nil {
+		jsonError(w, fmt.Sprintf("start: %v", err), 500)
+		return
+	}
+	jsonOK(w, map[string]string{"status": "started"})
+}
+
+func handleStop(w http.ResponseWriter, r *http.Request) {
+	name := stripPrefix(strings.TrimSuffix(r.URL.Path, "/stop"), "/api/containers/")
+
+	ok, userID := validateUser(r)
+	if !ok {
+		jsonError(w, "unauthorized", 401)
+		return
+	}
+
+	instMu.Lock()
+	rec, exists := instances[name]
+	instMu.Unlock()
+	if !exists || rec.UserID != userID {
+		jsonError(w, "not found", 404)
+		return
+	}
+
+	cli := clientForInstance(name)
+	if err := cli.StopContainer(name); err != nil {
+		jsonError(w, fmt.Sprintf("stop: %v", err), 500)
+		return
+	}
+	jsonOK(w, map[string]string{"status": "stopped"})
+}
+
+func handleRestart(w http.ResponseWriter, r *http.Request) {
+	name := stripPrefix(strings.TrimSuffix(r.URL.Path, "/restart"), "/api/containers/")
+
+	ok, userID := validateUser(r)
+	if !ok {
+		jsonError(w, "unauthorized", 401)
+		return
+	}
+
+	instMu.Lock()
+	rec, exists := instances[name]
+	instMu.Unlock()
+	if !exists || rec.UserID != userID {
+		jsonError(w, "not found", 404)
+		return
+	}
+
+	cli := clientForInstance(name)
+	// Restart = stop + start
+	if err := cli.StopContainer(name); err != nil {
+		jsonError(w, fmt.Sprintf("stop: %v", err), 500)
+		return
+	}
+	if err := cli.StartContainer(name); err != nil {
+		jsonError(w, fmt.Sprintf("start: %v", err), 500)
+		return
+	}
+	jsonOK(w, map[string]string{"status": "restarted"})
+}
+
+func handlePlans(w http.ResponseWriter, r *http.Request) {
+	jsonOK(w, plans)
 }
 
 func handleResize(w http.ResponseWriter, r *http.Request) {
@@ -778,6 +872,7 @@ func handleAdminListContainers(w http.ResponseWriter, r *http.Request) {
 			"node":        rec.Node,
 			"ports":       map[string]int{"ssh": rec.SSHExtPort, "service": rec.ServiceExtPort},
 			"created":     rec.Created.Format(time.RFC3339),
+			"terminalUrl": fmt.Sprintf("https://%s/terminal/%s", cfg.Domain, name),
 		})
 	}
 	instMu.Unlock()
@@ -809,6 +904,85 @@ func handleAdminDeleteContainer(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[Admin] Deleting container %s", name)
 	destroyContainer(name)
 	jsonOK(w, map[string]string{"status": "deleted"})
+}
+
+// handleAdminStartContainer allows admin to start any container.
+func handleAdminStartContainer(w http.ResponseWriter, r *http.Request) {
+	name := stripPrefix(strings.TrimSuffix(r.URL.Path, "/start"), "/api/admin/containers/")
+	if name == "" || strings.Contains(name, "/") {
+		jsonError(w, "name required", 400)
+		return
+	}
+
+	instMu.Lock()
+	_, exists := instances[name]
+	instMu.Unlock()
+	if !exists {
+		jsonError(w, "not found", 404)
+		return
+	}
+
+	log.Printf("[Admin] Starting container %s", name)
+	cli := clientForInstance(name)
+	if err := cli.StartContainer(name); err != nil {
+		jsonError(w, fmt.Sprintf("start: %v", err), 500)
+		return
+	}
+	jsonOK(w, map[string]string{"status": "started"})
+}
+
+// handleAdminStopContainer allows admin to stop any container.
+func handleAdminStopContainer(w http.ResponseWriter, r *http.Request) {
+	name := stripPrefix(strings.TrimSuffix(r.URL.Path, "/stop"), "/api/admin/containers/")
+	if name == "" || strings.Contains(name, "/") {
+		jsonError(w, "name required", 400)
+		return
+	}
+
+	instMu.Lock()
+	_, exists := instances[name]
+	instMu.Unlock()
+	if !exists {
+		jsonError(w, "not found", 404)
+		return
+	}
+
+	log.Printf("[Admin] Stopping container %s", name)
+	cli := clientForInstance(name)
+	if err := cli.StopContainer(name); err != nil {
+		jsonError(w, fmt.Sprintf("stop: %v", err), 500)
+		return
+	}
+	jsonOK(w, map[string]string{"status": "stopped"})
+}
+
+// handleAdminRestartContainer allows admin to restart any container.
+func handleAdminRestartContainer(w http.ResponseWriter, r *http.Request) {
+	name := stripPrefix(strings.TrimSuffix(r.URL.Path, "/restart"), "/api/admin/containers/")
+	if name == "" || strings.Contains(name, "/") {
+		jsonError(w, "name required", 400)
+		return
+	}
+
+	instMu.Lock()
+	_, exists := instances[name]
+	instMu.Unlock()
+	if !exists {
+		jsonError(w, "not found", 404)
+		return
+	}
+
+	log.Printf("[Admin] Restarting container %s", name)
+	cli := clientForInstance(name)
+	if err := cli.StopContainer(name); err != nil {
+		jsonError(w, fmt.Sprintf("stop: %v", err), 500)
+		return
+	}
+	if err := cli.StartContainer(name); err != nil {
+		jsonError(w, fmt.Sprintf("start: %v", err), 500)
+		return
+	}
+	jsonOK(w, map[string]string{"status": "restarted"})
 }
 
 // handleAdminResizeContainer allows admin to resize any container.
@@ -1086,9 +1260,20 @@ func handleRegions(w http.ResponseWriter, r *http.Request) {
 	}
 	nodesMu.Unlock()
 
-	var regions []string
-	for r := range seen {
-		regions = append(regions, r)
+	var regions []RegionInfo
+	for id := range seen {
+		meta, ok := regionMeta[id]
+		if !ok {
+			meta = struct {
+				City    string `json:"city"`
+				Country string `json:"country"`
+			}{City: id, Country: "XX"}
+		}
+		regions = append(regions, RegionInfo{
+			ID:      id,
+			City:    meta.City,
+			Country: meta.Country,
+		})
 	}
 	jsonOK(w, regions)
 }
@@ -1122,6 +1307,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		handleAdminLogin(w, r)
 	case p == "/api/regions" && r.Method == "GET":
 		handleRegions(w, r)
+	case p == "/api/plans" && r.Method == "GET":
+		handlePlans(w, r)
 	case p == "/api/health" && r.Method == "GET":
 		jsonOK(w, map[string]string{"status": "ok"})
 	// Nodes (admin auth)
@@ -1201,6 +1388,24 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		handleAdminListContainers(w, r)
+	case strings.HasPrefix(p, "/api/admin/containers/") && strings.HasSuffix(p, "/start") && r.Method == "POST":
+		if !validateAdmin(r) {
+			jsonError(w, "unauthorized", 401)
+			return
+		}
+		handleAdminStartContainer(w, r)
+	case strings.HasPrefix(p, "/api/admin/containers/") && strings.HasSuffix(p, "/stop") && r.Method == "POST":
+		if !validateAdmin(r) {
+			jsonError(w, "unauthorized", 401)
+			return
+		}
+		handleAdminStopContainer(w, r)
+	case strings.HasPrefix(p, "/api/admin/containers/") && strings.HasSuffix(p, "/restart") && r.Method == "POST":
+		if !validateAdmin(r) {
+			jsonError(w, "unauthorized", 401)
+			return
+		}
+		handleAdminRestartContainer(w, r)
 	case strings.HasPrefix(p, "/api/admin/containers/") && strings.HasSuffix(p, "/resize") && r.Method == "PUT":
 		if !validateAdmin(r) {
 			jsonError(w, "unauthorized", 401)
@@ -1218,6 +1423,12 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		handleCreate(w, r)
 	case p == "/api/containers" && r.Method == "GET":
 		handleList(w, r)
+	case strings.HasPrefix(p, "/api/containers/") && strings.HasSuffix(p, "/start") && r.Method == "POST":
+		handleStart(w, r)
+	case strings.HasPrefix(p, "/api/containers/") && strings.HasSuffix(p, "/stop") && r.Method == "POST":
+		handleStop(w, r)
+	case strings.HasPrefix(p, "/api/containers/") && strings.HasSuffix(p, "/restart") && r.Method == "POST":
+		handleRestart(w, r)
 	case strings.HasPrefix(p, "/api/containers/") && strings.HasSuffix(p, "/resize") && r.Method == "PUT":
 		handleResize(w, r)
 	case strings.HasPrefix(p, "/api/containers/") && r.Method == "GET":
@@ -1259,6 +1470,8 @@ func cmdServe() {
 	http.HandleFunc("/_version", func(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, map[string]string{"version": version})
 	})
+	http.HandleFunc("/terminal/", handleTerminalPage)
+	http.HandleFunc("/ws/terminal", handleTerminalWS)
 
 	if domain != "" {
 		// DNS-01 mode via certmagic + Cloudflare

@@ -28,11 +28,47 @@ Base URL: `https://<host>:<port>` (default port: `8080`, or `443` with autocert)
 
 ### `GET /api/regions` — 可用区域列表
 
-返回当前有节点的区域，方便用户创建容器时选择。
+返回当前有节点的区域及其国家代码，方便前端显示国旗图标。
 
 **响应** `200`：
 ```json
-["tokyo", "ewr"]
+[
+  { "id": "tokyo", "city": "Tokyo", "country": "JP" },
+  { "id": "ewr",   "city": "Newark", "country": "US" }
+]
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `id` | string | 区域标识符，用于创建容器时传 `region` 参数 |
+| `city` | string | 城市名称 |
+| `country` | string | [ISO 3166-1 alpha-2](https://en.wikipedia.org/wiki/ISO_3166-1_alpha-2) 国家代码，例如 `JP`, `US` |
+
+> 仅返回当前至少有一个活跃节点的区域。区域元数据来自内置映射表（`cmd/lxc-manager/regions.go`），未在映射表中的区域将使用原始 ID 作为 city、`XX` 作为 country。
+
+### `GET /api/plans` — 可用套餐列表
+
+返回预定义的容器规格套餐。
+
+**响应** `200`：
+```json
+[
+  { "id": "lxc-1c-512mb", "cpu": 1, "mem": 512,  "disk": 10, "monthlyCost": 300,  "bandwidth": 512  },
+  { "id": "lxc-1c-1gb",   "cpu": 1, "mem": 1024, "disk": 25, "monthlyCost": 600,  "bandwidth": 1024 },
+  { "id": "lxc-1c-2gb",   "cpu": 1, "mem": 2048, "disk": 50, "monthlyCost": 1200, "bandwidth": 2048 },
+  { "id": "lxc-2c-2gb",   "cpu": 2, "mem": 2048, "disk": 65, "monthlyCost": 1800, "bandwidth": 3072 },
+  { "id": "lxc-2c-4gb",   "cpu": 2, "mem": 4096, "disk": 80, "monthlyCost": 2400, "bandwidth": 3072 }
+]
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `id` | string | 套餐标识符 |
+| `cpu` | int | CPU 核数 |
+| `mem` | int | 内存 (MB) |
+| `disk` | int | 磁盘 (GB) |
+| `monthlyCost` | int | 月费（美分） |
+| `bandwidth` | int | 月流量配额 (GB) |
 ```
 
 ### `POST /api/admin/login` — 管理员登录
@@ -155,6 +191,39 @@ Base URL: `https://<host>:<port>` (default port: `8080`, or `443` with autocert)
 **响应** `200`：
 ```json
 { "status": "deleted" }
+```
+
+### `POST /api/containers/{name}/start` — 启动容器
+
+启动已停止的容器。只能操作自己的容器。
+
+**请求头**：`Authorization: Bearer <user-token>`
+
+**响应** `200`：
+```json
+{ "status": "started" }
+```
+
+### `POST /api/containers/{name}/stop` — 停止容器
+
+停止运行中的容器。只能操作自己的容器。
+
+**请求头**：`Authorization: Bearer <user-token>`
+
+**响应** `200`：
+```json
+{ "status": "stopped" }
+```
+
+### `POST /api/containers/{name}/restart` — 重启容器
+
+重启容器。只能操作自己的容器。
+
+**请求头**：`Authorization: Bearer <user-token>`
+
+**响应** `200`：
+```json
+{ "status": "restarted" }
 ```
 
 ---
@@ -315,6 +384,78 @@ Base URL: `https://<host>:<port>` (default port: `8080`, or `443` with autocert)
   "userID": "u_a1b2c3d4e5f6",
   "name":   "bob"
 }
+```
+
+---
+
+## 管理员容器操作（Admin Token 认证）
+
+管理员可以操作任意用户的容器，不受 userID 隔离限制。
+
+### `POST /api/admin/containers` — 创建容器（管理员）
+
+为指定用户创建容器。
+
+**请求头**：`Authorization: Bearer <admin-token>`
+
+**请求体**：
+```json
+{
+  "userID":      "u_a1b2c3d4e5f6",
+  "cpu":         1,
+  "mem":         512,
+  "disk":        10,
+  "servicePort": 8080,
+  "userData":    "#cloud-config\n...",
+  "region":       "tokyo"
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `userID` | string | ✅ | 目标用户 ID |
+| 其他字段 | | | 同用户 `POST /api/containers` |
+
+### `GET /api/admin/containers` — 列出所有容器
+
+**请求头**：`Authorization: Bearer <admin-token>`
+
+**响应** `200`：容器列表
+
+### `DELETE /api/admin/containers/{name}` — 删除容器（管理员）
+
+**请求头**：`Authorization: Bearer <admin-token>`
+
+**响应** `200`：
+```json
+{ "status": "deleted" }
+```
+
+### `POST /api/admin/containers/{name}/start` — 启动容器（管理员）
+
+**请求头**：`Authorization: Bearer <admin-token>`
+
+**响应** `200`：
+```json
+{ "status": "started" }
+```
+
+### `POST /api/admin/containers/{name}/stop` — 停止容器（管理员）
+
+**请求头**：`Authorization: Bearer <admin-token>`
+
+**响应** `200`：
+```json
+{ "status": "stopped" }
+```
+
+### `POST /api/admin/containers/{name}/restart` — 重启容器（管理员）
+
+**请求头**：`Authorization: Bearer <admin-token>`
+
+**响应** `200`：
+```json
+{ "status": "restarted" }
 ```
 
 ---
