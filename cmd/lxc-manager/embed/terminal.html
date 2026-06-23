@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Terminal — {{.Name}}</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css" />
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #1e1e1e; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
+  #login {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    background: #2d2d2d; padding: 32px; border-radius: 8px; text-align: center;
+    color: #ccc; min-width: 320px; z-index: 10;
+  }
+  #login h2 { margin-bottom: 8px; color: #fff; font-size: 18px; }
+  #login .sub { margin-bottom: 20px; color: #888; font-size: 13px; }
+  #login input {
+    width: 100%; padding: 10px; margin-bottom: 12px; border: 1px solid #555;
+    border-radius: 4px; background: #1e1e1e; color: #eee; font-size: 14px;
+    outline: none;
+  }
+  #login input:focus { border-color: #4fc3f7; }
+  #login button {
+    width: 100%; padding: 10px; background: #4fc3f7; color: #1e1e1e;
+    border: none; border-radius: 4px; font-size: 14px; font-weight: 600;
+    cursor: pointer;
+  }
+  #login button:disabled { opacity: 0.5; cursor: default; }
+  #login .error { color: #ef5350; margin-top: 8px; font-size: 13px; display: none; }
+  #terminal { position: absolute; top: 0; left: 0; right: 0; bottom: 0; display: none; }
+</style>
+</head>
+<body>
+<div id="login">
+  <h2>{{.Name}}</h2>
+  <div class="sub">Enter root password to connect</div>
+  <input type="password" id="password" placeholder="Password" autofocus />
+  <button id="connectBtn" onclick="connect()">Connect</button>
+  <div class="error" id="error"></div>
+</div>
+<div id="terminal"></div>
+
+<script>
+var term, ws, fitAddon;
+var container = "{{.Name}}";
+
+function showError(msg) {
+  var el = document.getElementById('error');
+  el.textContent = msg; el.style.display = 'block';
+}
+
+function connect() {
+  var btn = document.getElementById('connectBtn');
+  var pw = document.getElementById('password').value;
+  if (!pw) { showError('Password required'); return; }
+  btn.disabled = true; btn.textContent = 'Connecting...';
+  document.getElementById('error').style.display = 'none';
+
+  var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  var url = proto + '//' + location.host + '/ws/terminal?name=' + encodeURIComponent(container) + '&password=' + encodeURIComponent(pw);
+
+  ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = function() {
+    document.getElementById('login').style.display = 'none';
+    var termEl = document.getElementById('terminal');
+    termEl.style.display = 'block';
+
+    term = new Terminal({ cursorBlink: true, fontSize: 14, fontFamily: 'Menlo, Monaco, "Courier New", monospace' });
+    fitAddon = new FitAddon.FitAddon();
+    term.loadAddon(fitAddon);
+    term.open(termEl);
+    fitAddon.fit();
+
+    term.onData(function(data) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(data); });
+    window.addEventListener('resize', function() { fitAddon.fit(); });
+  };
+
+  ws.onmessage = function(evt) { if (term) term.write(new Uint8Array(evt.data)); };
+
+  ws.onclose = function() {
+    if (term) term.write('\r\n\u001b[31mConnection closed.\u001b[0m\r\n');
+    btn.disabled = false; btn.textContent = 'Reconnect';
+    document.getElementById('login').style.display = 'block';
+  };
+
+  ws.onerror = function() { showError('Connection failed'); btn.disabled = false; btn.textContent = 'Connect'; };
+}
+
+document.getElementById('password').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') connect();
+});
+</script>
+</body>
+</html>
