@@ -84,6 +84,10 @@ jobs:
 
           echo "LXC_MANAGER_VERSION=${RESOLVED}" >> "${GITHUB_ENV}"
 
+      - name: Set letsencrypt_staging
+        if: inputs.action == 'deploy'
+        run: echo "LETSENCRYPT_STAGING=${{ inputs.letsencrypt_staging }}" >> "${GITHUB_ENV}"
+
       - name: Verify release assets accessible
         if: inputs.action == 'deploy'
         run: |
