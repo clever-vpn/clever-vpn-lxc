@@ -15,6 +15,11 @@ on:
         required: false
         type: string
         default: 'latest'
+      letsencrypt_staging:
+        description: 'Use Let\'s Encrypt staging CA (for testing)'
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -157,6 +162,7 @@ jobs:
             -var "r2_account_id=$R2_ACCOUNT_ID" \
             -var "r2_access_key_id=$R2_ACCESS_KEY_ID" \
             -var "r2_secret_access_key=$R2_SECRET_ACCESS_KEY" \
+            -var "letsencrypt_staging=$LETSENCRYPT_STAGING" \
             -out=tfplan
 
       - name: Terraform Apply (deploy)
@@ -176,6 +182,7 @@ jobs:
             -var "r2_account_id=$R2_ACCOUNT_ID" \
             -var "r2_access_key_id=$R2_ACCESS_KEY_ID" \
             -var "r2_secret_access_key=$R2_SECRET_ACCESS_KEY" \
+            -var "letsencrypt_staging=$LETSENCRYPT_STAGING" \
             -auto-approve
 
       - name: Show outputs
