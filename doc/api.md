@@ -298,7 +298,8 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
   "region":      "nrt",
   "sshHost":     "192.168.1.10",
   "sshPort":     22,
-  "sshPassword": "password"
+  "sshPassword": "password",
+  "poolSize":    "10"
 }
 ```
 
@@ -309,6 +310,7 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 | `sshHost` | LXD 宿主机 IP |
 | `sshPort` | SSH 端口（默认 22） |
 | `sshPassword` | root 密码 |
+| `poolSize` | **新增** btrfs 存储池大小（GiB），默认 10 |
 
 **响应** `200`：
 ```json
@@ -317,7 +319,8 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
   "id": "nd_abc123",
   "name": "vultr-nrt",
   "region": "nrt",
-  "url": "https://192.168.1.10:8443"
+  "url": "https://192.168.1.10:8443",
+  "poolSize": "10"
 }
 ```
 

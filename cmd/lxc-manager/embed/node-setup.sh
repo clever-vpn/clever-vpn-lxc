@@ -66,7 +66,7 @@ install_lxd() {
 }
 
 init_lxd() {
-    local pool_size="${STORAGE_POOL_SIZE:-15}"
+    local pool_size="${STORAGE_POOL_SIZE:-10}"
 
     # Idempotent: clean up any previous LXD initialization before re-creating.
     if lxc storage show default &>/dev/null 2>&1; then

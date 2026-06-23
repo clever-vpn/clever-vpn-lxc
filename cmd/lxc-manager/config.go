@@ -46,7 +46,7 @@ func defaultConfig() Config {
 		LXDBaseImage:    "clever-vpn-base",
 		LXDNetwork:      "vpnbr0",
 		LXCNamePrefix:   "user-",
-		StoragePoolSize: "15",
+		StoragePoolSize: "10",
 		Backup: BackupConfig{
 			Interval: "1h",
 		},
