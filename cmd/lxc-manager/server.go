@@ -130,6 +130,15 @@ func loadInstances() {
 		if r.Health == "" {
 			r.Health = "healthy"
 		}
+		// Auto-fix: infer region from node if missing (pre-v1.2.11 bug)
+		if r.Region == "" && r.Node != "" {
+			nodesMu.Lock()
+			if n, ok := nodes[r.Node]; ok {
+				r.Region = n.Region
+				log.Printf("Auto-fixed region for %s: %s", r.Name, r.Region)
+			}
+			nodesMu.Unlock()
+		}
 		instances[r.Name] = r
 		usedSSH[r.SSHExtPort] = true
 		usedSvc[r.ServiceExtPort] = true
@@ -1683,8 +1692,8 @@ func cmdServe() {
 	loadUsers()
 	loadAdminPassword()
 	loadAdminTokens()
-	loadInstances()
 	loadNodes()
+	loadInstances()
 	loadRegions()
 	loadPlans()
 
