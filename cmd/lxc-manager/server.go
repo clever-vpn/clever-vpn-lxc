@@ -583,6 +583,8 @@ func handleList(w http.ResponseWriter, r *http.Request) {
 				if r.HealthReason != "" {
 					entry["healthReason"] = r.HealthReason
 				}
+				entry["region"] = r.Region
+				entry["nodeID"] = r.Node
 			}
 			instMu.Unlock()
 
@@ -628,6 +630,8 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 	if rec.HealthReason != "" {
 		resp["healthReason"] = rec.HealthReason
 	}
+	resp["region"] = rec.Region
+	resp["nodeID"] = rec.Node
 	jsonOK(w, resp)
 }
 
@@ -1048,6 +1052,7 @@ func handleAdminListContainers(w http.ResponseWriter, r *http.Request) {
 			"mem":          rec.Mem,
 			"disk":         rec.Disk,
 			"servicePort":  rec.ServicePort,
+			"region":       rec.Region,
 			"node":         rec.Node,
 			"ports":        map[string]int{"ssh": rec.SSHExtPort, "service": rec.ServiceExtPort},
 			"created":      rec.Created.Format(time.RFC3339),
