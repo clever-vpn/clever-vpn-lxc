@@ -1836,11 +1836,19 @@ func injectBlock(hostname, bootstrapContent string) string {
 SystemMaxUse=100M
 MaxRetentionSec=3day
 `
+	// Fix broken PS1 left by old base image; use /etc/profile.d to override cleanly.
+	ps1Content := `# clever-vpn: correct PS1 for root
+if [ "$(id -u)" -eq 0 ]; then
+    export PS1="\[\e[1;32m\]root@clever-vpn\[\e[0m\]:\w\$ "
+fi`
 	return fmt.Sprintf(
 		"hostname: %s\npreserve_hostname: false\nwrite_files:\n"+
 			"  - path: /etc/clever-vpn/bootstrap.env\n    permissions: '0600'\n    owner: root:root\n    content: |\n%s"+
-			"  - path: /etc/systemd/journald.conf.d/50-limit.conf\n    permissions: '0644'\n    owner: root:root\n    content: |\n%s",
-		hostname, indent(bootstrapContent, "      "), indent(journaldConf, "      "))
+			"  - path: /etc/systemd/journald.conf.d/50-limit.conf\n    permissions: '0644'\n    owner: root:root\n    content: |\n%s"+
+			"  - path: /etc/profile.d/clever-vpn-ps1.sh\n    permissions: '0644'\n    owner: root:root\n    content: |\n%s"+
+			"\nruncmd:\n"+
+			"  - sed -i '/^export PS1=/d' /etc/bash.bashrc",
+		hostname, indent(bootstrapContent, "      "), indent(journaldConf, "      "), indent(ps1Content, "      "))
 }
 
 func mergeUserData(userSupplied, hostname, bootstrapContent, password string) string {
