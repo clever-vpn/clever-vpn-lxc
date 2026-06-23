@@ -22,8 +22,6 @@ import (
 	"github.com/libdns/cloudflare"
 )
 
-var lxdClient *lxc.Client
-
 // ==================== Request / Response ====================
 
 type CreateReq struct {
@@ -210,53 +208,14 @@ func unregisterInstance(name string) {
 
 // ==================== DNAT ====================
 
-// addPortForwardOnNode adds DNAT rules on the appropriate host.
-// Uses local iptables when nodeID is empty, or SSH to the remote node otherwise.
-func addPortForwardOnNode(nodeID string, extPort int, dstIP string, dstPort int) error {
-	if nodeID != "" {
-		return addNodePortForward(nodeID, extPort, dstIP, dstPort)
-	}
-	return addPortForward(extPort, dstIP, dstPort)
+// addPortForward adds DNAT rules on the node via SSH.
+func addPortForward(nodeID string, extPort int, dstIP string, dstPort int) error {
+	return addRemotePortForward(nodeID, extPort, dstIP, dstPort)
 }
 
-// delPortForwardOnNode removes DNAT rules on the appropriate host.
-func delPortForwardOnNode(nodeID string, extPort int, dstIP string, dstPort int) {
-	if nodeID != "" {
-		delNodePortForward(nodeID, extPort, dstIP, dstPort)
-		return
-	}
-	delPortForward(extPort, dstIP, dstPort)
-}
-
-// addPortForward adds DNAT rules on the local host via iptables.
-func addPortForward(extPort int, ip string, intPort int) error {
-	for _, proto := range []string{"tcp", "udp"} {
-		for _, chain := range []string{"PREROUTING", "OUTPUT"} {
-			c := exec.Command("iptables", "-t", "nat", "-C", chain,
-				"-p", proto, "--dport", strconv.Itoa(extPort),
-				"-j", "DNAT", "--to", fmt.Sprintf("%s:%d", ip, intPort))
-			if c.Run() == nil {
-				continue
-			}
-			a := exec.Command("iptables", "-t", "nat", "-A", chain,
-				"-p", proto, "--dport", strconv.Itoa(extPort),
-				"-j", "DNAT", "--to", fmt.Sprintf("%s:%d", ip, intPort))
-			if err := a.Run(); err != nil {
-				return fmt.Errorf("iptables %s %s:%d: %w", chain, proto, extPort, err)
-			}
-		}
-	}
-	return nil
-}
-
-func delPortForward(extPort int, ip string, intPort int) {
-	for _, proto := range []string{"tcp", "udp"} {
-		for _, chain := range []string{"PREROUTING", "OUTPUT"} {
-			exec.Command("iptables", "-t", "nat", "-D", chain,
-				"-p", proto, "--dport", strconv.Itoa(extPort),
-				"-j", "DNAT", "--to", fmt.Sprintf("%s:%d", ip, intPort)).Run()
-		}
-	}
+// delPortForward removes DNAT rules on the node via SSH.
+func delPortForward(nodeID string, extPort int, dstIP string, dstPort int) {
+	delRemotePortForward(nodeID, extPort, dstIP, dstPort)
 }
 
 // ==================== HTTP Helpers ====================
@@ -344,14 +303,14 @@ func recoverInstances() {
 	log.Printf("Recovering %d instance(s)...", len(instances))
 
 	for name, rec := range instances {
-		cli := lxdClient
-		if rec.Node != "" {
-			if c, err := getNodeClient(rec.Node); err == nil {
-				cli = c
-			} else {
-				log.Printf("  %s: node %s unreachable: %v", name, rec.Node, err)
-				continue
-			}
+		if rec.Node == "" {
+			log.Printf("  %s: no node assigned, skipping", name)
+			continue
+		}
+		cli, err := getNodeClient(rec.Node)
+		if err != nil {
+			log.Printf("  %s: node %s unreachable: %v", name, rec.Node, err)
+			continue
 		}
 
 		c, err := cli.GetContainer(name)
@@ -374,11 +333,11 @@ func recoverInstances() {
 			continue
 		}
 
-		if err := addPortForwardOnNode(rec.Node, rec.SSHExtPort, vip, 22); err != nil {
+		if err := addPortForward(rec.Node, rec.SSHExtPort, vip, 22); err != nil {
 			log.Printf("  %s: forward ssh %d: %v", name, rec.SSHExtPort, err)
 			continue
 		}
-		if err := addPortForwardOnNode(rec.Node, rec.ServiceExtPort, vip, rec.ServicePort); err != nil {
+		if err := addPortForward(rec.Node, rec.ServiceExtPort, vip, rec.ServicePort); err != nil {
 			log.Printf("  %s: forward svc %d: %v", name, rec.ServiceExtPort, err)
 			continue
 		}
@@ -518,13 +477,13 @@ func handleCreate(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, fmt.Sprintf("get ip: %v", err), 500)
 		return
 	}
-	if err := addPortForwardOnNode(nodeID, ports.SSH, vip, 22); err != nil {
+	if err := addPortForward(nodeID, ports.SSH, vip, 22); err != nil {
 		unregisterInstance(name)
 		jsonError(w, fmt.Sprintf("forward ssh: %v", err), 500)
 		return
 	}
-	if err := addPortForwardOnNode(nodeID, ports.Service, vip, req.ServicePort); err != nil {
-		delPortForwardOnNode(nodeID, ports.SSH, vip, 22)
+	if err := addPortForward(nodeID, ports.Service, vip, req.ServicePort); err != nil {
+		delPortForward(nodeID, ports.SSH, vip, 22)
 		unregisterInstance(name)
 		jsonError(w, fmt.Sprintf("forward svc: %v", err), 500)
 		return
@@ -555,13 +514,15 @@ func clientForInstance(name string) *lxc.Client {
 	instMu.Lock()
 	rec, ok := instances[name]
 	instMu.Unlock()
-	if ok && rec.Node != "" {
-		if c, err := getNodeClient(rec.Node); err == nil {
-			return c
-		}
-		log.Printf("WARNING: node %s unreachable, falling back to default", rec.Node)
+	if !ok || rec.Node == "" {
+		return nil
 	}
-	return lxdClient
+	c, err := getNodeClient(rec.Node)
+	if err != nil {
+		log.Printf("WARNING: node %s unreachable for %s: %v", rec.Node, name, err)
+		return nil
+	}
+	return c
 }
 
 func handleList(w http.ResponseWriter, r *http.Request) {
@@ -586,14 +547,15 @@ func handleList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// List LXD containers, filter by owned names
-	if len(nodes) == 0 && lxdClient == nil {
+	if len(nodes) == 0 {
 		jsonOK(w, []map[string]string{})
 		return
 	}
-	cli := lxdClient
-	for _, c := range pool {
-		cli = c
-		break
+	// Use any available node client
+	cli, err := getDefaultClient()
+	if err != nil {
+		jsonOK(w, []map[string]string{})
+		return
 	}
 	all, _ := cli.ListContainers(env("LXC_NAME_PREFIX", "user-"))
 
@@ -696,8 +658,8 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 
 	vip, _ := cli.InstanceIPv4(name, 5*time.Second)
 	if vip != "" {
-		delPortForwardOnNode(rec.Node, rec.SSHExtPort, vip, 22)
-		delPortForwardOnNode(rec.Node, rec.ServiceExtPort, vip, rec.ServicePort)
+		delPortForward(rec.Node, rec.SSHExtPort, vip, 22)
+		delPortForward(rec.Node, rec.ServiceExtPort, vip, rec.ServicePort)
 	}
 	unregisterInstance(name)
 
@@ -1035,13 +997,13 @@ func handleAdminCreateContainer(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, fmt.Sprintf("get ip: %v", err), 500)
 		return
 	}
-	if err := addPortForwardOnNode(nodeID, ports.SSH, vip, 22); err != nil {
+	if err := addPortForward(nodeID, ports.SSH, vip, 22); err != nil {
 		unregisterInstance(name)
 		jsonError(w, fmt.Sprintf("forward ssh: %v", err), 500)
 		return
 	}
-	if err := addPortForwardOnNode(nodeID, ports.Service, vip, req.ServicePort); err != nil {
-		delPortForwardOnNode(nodeID, ports.SSH, vip, 22)
+	if err := addPortForward(nodeID, ports.Service, vip, req.ServicePort); err != nil {
+		delPortForward(nodeID, ports.SSH, vip, 22)
 		unregisterInstance(name)
 		jsonError(w, fmt.Sprintf("forward svc: %v", err), 500)
 		return
@@ -1442,8 +1404,8 @@ func destroyContainer(name string) {
 	rec, ok := instances[name]
 	instMu.Unlock()
 	if ok && vip != "" {
-		delPortForwardOnNode(rec.Node, rec.SSHExtPort, vip, 22)
-		delPortForwardOnNode(rec.Node, rec.ServiceExtPort, vip, rec.ServicePort)
+		delPortForward(rec.Node, rec.SSHExtPort, vip, 22)
+		delPortForward(rec.Node, rec.ServiceExtPort, vip, rec.ServicePort)
 	}
 
 	if !strings.EqualFold(container.Status, "Stopped") {
@@ -1740,9 +1702,9 @@ func cmdServe() {
 	loadPlans()
 
 	var err error
-	lxdClient, err = getDefaultClient()
+	_, err = getDefaultClient()
 	if err != nil {
-		log.Printf("WARNING: no LXD connection: %v (will retry on demand)", err)
+		log.Printf("WARNING: no nodes available: %v (add a node first)", err)
 	} else {
 		recoverInstances()
 	}
