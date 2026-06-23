@@ -251,22 +251,29 @@ func removeNodeClient(nodeID string) {
 var localClient *lxc.Client
 
 func getDefaultClient() (*lxc.Client, error) {
-	if len(nodes) == 0 {
-		if localClient == nil {
-			clientCert := loadFile(env("LXD_CLIENT_CERT", "client.crt"))
-			clientKey := loadFile(env("LXD_CLIENT_KEY", "client.key"))
-			c, err := lxc.NewClient(env("LXD_URL", "https://127.0.0.1:8443"), clientCert, clientKey)
-			if err != nil {
-				return nil, err
-			}
-			localClient = c
+	_, c, err := getDefaultNodeClient()
+	return c, err
+}
+
+// getDefaultNodeClient returns a node ID and LXD client. When no registered
+// nodes exist, falls back to the local LXD socket with an empty node ID.
+func getDefaultNodeClient() (string, *lxc.Client, error) {
+	if len(nodes) > 0 {
+		for id := range nodes {
+			c, err := getNodeClient(id)
+			return id, c, err
 		}
-		return localClient, nil
 	}
-	for id := range nodes {
-		return getNodeClient(id)
+	if localClient == nil {
+		clientCert := loadFile(env("LXD_CLIENT_CERT", "client.crt"))
+		clientKey := loadFile(env("LXD_CLIENT_KEY", "client.key"))
+		c, err := lxc.NewClient(env("LXD_URL", "https://127.0.0.1:8443"), clientCert, clientKey)
+		if err != nil {
+			return "", nil, err
+		}
+		localClient = c
 	}
-	return nil, fmt.Errorf("no nodes available")
+	return "", localClient, nil
 }
 
 // cleanupOrphanContainers finds containers on a node that are not in our
