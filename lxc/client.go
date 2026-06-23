@@ -198,7 +198,6 @@ func (c *Client) InstanceIPv4(name string, timeout time.Duration) (string, error
 	return "", fmt.Errorf("timed out waiting for IPv4 for %s", name)
 }
 
-
 // ExecCheck runs a lightweight command inside a container to verify it is responsive.
 // Returns nil if the command exits with code 0 within the given timeout.
 func (c *Client) ExecCheck(name string, timeout time.Duration) error {
