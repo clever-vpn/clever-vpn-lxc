@@ -83,7 +83,7 @@ variable "r2_account_id" {
 
 variable "r2_bucket" {
   type    = string
-  default = "clever-vpn-lxc-backup"
+  default = "lxc-state"
 }
 
 variable "r2_access_key_id" {
