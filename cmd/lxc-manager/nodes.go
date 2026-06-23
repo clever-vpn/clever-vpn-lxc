@@ -371,15 +371,7 @@ func provisionNode(name, region, host string, port int, password string, poolSiz
 	// Wait for LXD daemon to be fully ready (first install takes time)
 	sshExec(client, "for i in $(seq 1 60); do lxc storage list &>/dev/null && break; sleep 2; done")
 
-	// 2. Initialize LXD with btrfs storage pool
-	poolCmd := fmt.Sprintf("lxd init --auto --storage-backend=btrfs --storage-create-loop=%s", poolSize)
-	out, err = sshExec(client, poolCmd)
-	if err != nil {
-		return nil, fmt.Errorf("init lxd (btrfs %sGiB): %w\n%s", poolSize, err, out)
-	}
-	log.Printf("  lxd init: btrfs %sGiB", poolSize)
-
-	// 3. Enable HTTPS API
+	// 2. Enable HTTPS API (doesn't need storage pool)
 	out, err = sshExec(client, "lxc config set core.https_address :8443 2>/dev/null || true")
 	if err != nil {
 		log.Printf("  WARNING: set https_address: %v\n%s", err, out)
@@ -402,11 +394,12 @@ func provisionNode(name, region, host string, port int, password string, poolSiz
 	}
 	log.Printf("  cert trusted")
 
-	// 5. Upload and run node setup script
+	// 5. Upload and run node setup script (handles idempotent LXD init with btrfs)
 	if err := scpBytes(client, "/tmp/node-setup.sh", []byte(embeddedNodeSetup), "0755"); err != nil {
 		return nil, fmt.Errorf("upload setup script: %w", err)
 	}
-	out, err = sshExec(client, "bash /tmp/node-setup.sh && rm -f /tmp/node-setup.sh")
+	setupCmd := fmt.Sprintf("STORAGE_POOL_SIZE=%s bash /tmp/node-setup.sh && rm -f /tmp/node-setup.sh", poolSize)
+	out, err = sshExec(client, setupCmd)
 	if err != nil {
 		return nil, fmt.Errorf("setup script: %w\n%s", err, out)
 	}

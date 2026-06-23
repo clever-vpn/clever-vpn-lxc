@@ -66,14 +66,22 @@ install_lxd() {
 }
 
 init_lxd() {
-    if lxc network show lxdbr0 &>/dev/null; then
-        log_info "LXD already initialized"
-        return 0
-    fi
-
     local pool_size="${STORAGE_POOL_SIZE:-15}"
+
+    # Idempotent: clean up any previous LXD initialization before re-creating.
+    if lxc storage show default &>/dev/null 2>&1; then
+        log_info "Removing existing storage pool 'default'..."
+        lxc profile device remove default root 2>/dev/null || true
+        lxc storage delete default 2>/dev/null || true
+    fi
+    if lxc network show lxdbr0 &>/dev/null 2>&1; then
+        log_info "Removing existing lxdbr0 network..."
+        lxc network delete lxdbr0 2>/dev/null || true
+    fi
+    rm -f /var/snap/lxd/common/lxd/disks/default.img
+
     log_info "Initializing LXD with btrfs (${pool_size}GiB loop)..."
-    lxd init --auto --storage-backend=btrfs --storage-create-loop="${pool_size}"
+    time lxd init --auto --storage-backend=btrfs --storage-create-loop="${pool_size}"
     log_info "LXD initialized with btrfs ${pool_size}GiB"
 }
 
