@@ -197,29 +197,27 @@ POST /api/nodes
 /var/lib/clever-vpn-lxc/
 ├── users.json         ← 用户记录（含 token）
 ├── admin-tokens.json  ← 管理员 token
+├── admin-tokens.json  ← 管理员 token
 ├── nodes.json         ← 节点注册表
 ├── instances.json     ← 容器实例注册表
+├── regions.json       ← 区域定义
+├── plans.json         ← 套餐定义
 └── certs/
     ├── acme_account+key
     └── your-domain.com
 ```
 
-### users.json
+所有数据文件统一格式：`{ "version": 1, "records": [...] }`
 
-用户记录，key 为不可变的 `userID`。`tokens` 数组是业务状态的一部分；运行时额外构建 `token → userID` 映射仅用于加速查询。
+### users.json
 
 ```json
 {
-  "u_a1b2c3d4": {
-    "id": "u_a1b2c3d4",
-    "name": "alice",
-    "tokens": ["cvl_abc123..."]
-  },
-  "u_e5f6g7h8": {
-    "id": "u_e5f6g7h8",
-    "name": "bob",
-    "tokens": ["cvl_def456..."]
-  }
+  "version": 1,
+  "records": [
+    { "id": "u_a1b2c3d4", "name": "alice", "tokens": ["cvl_abc123..."] },
+    { "id": "u_e5f6g7h8", "name": "bob",   "tokens": ["cvl_def456..."] }
+  ]
 }
 ```
 
@@ -229,80 +227,55 @@ POST /api/nodes
 | `name` | string | 显示名称，可通过 `rename-user` 修改 |
 | `tokens` | []string | 该用户的活跃认证 token 列表 |
 
-### admin-tokens.json
-
-管理员 token，key 为 token，value 为名称。
-
-```json
-{
-  "cva_xyz789...": "superadmin"
-}
-```
-
 ### nodes.json
 
-LXD 节点注册表，key 为节点名称。
-
 ```json
 {
-  "nd_abc123": {
-    "id": "nd_abc123",
-    "name": "tokyo-1",
-    "region": "tokyo",
-    "url": "https://192.168.1.10:8443",
-    "network": "vpnbr0",
-    "sshHost": "192.168.1.10",
-    "sshPort": 22,
-    "image": "clever-vpn-base"
-  }
+  "version": 1,
+  "records": [
+    {
+      "id": "nd_abc123",
+      "name": "vultr-nrt",
+      "region": "nrt",
+      "url": "https://192.168.1.10:8443",
+      "network": "vpnbr0",
+      "sshHost": "192.168.1.10",
+      "sshPort": 22,
+      "image": "clever-vpn-base"
+    }
+  ]
 }
 ```
-
-| 字段 | 说明 |
-|------|------|
-| `id` | 不可变唯一标识 |
-| `name` | 人类可读名称，唯一 |
-| `region` | 地理位置（如 `tokyo`），多节点可共享 |
-| `url` | LXD HTTPS API 地址 |
-| `network` | 容器网桥名称 |
-| `sshHost` / `sshPort` | 供给时使用的 SSH 信息 |
-| `image` | 容器基础镜像别名 |
 
 ### instances.json
 
-容器实例注册表，key 为容器名。
-
 ```json
 {
-  "user-3f8a1b2c": {
-    "cpu": 1,
-    "mem": 512,
-    "disk": 10,
-    "servicePort": 443,
-    "sshExtPort": 22001,
-    "serviceExtPort": 50001,
-    "userID": "u_a1b2c3d4",
-    "token": "cvl_abc123...",
-    "password": "Ab3Xy9...",
-    "nodeID": "nd_abc123",
-    "created": "2026-06-21T10:30:00Z"
-  }
+  "version": 1,
+  "records": [
+    {
+      "id": "user-3f8a1b2c",
+      "cpu": 1, "mem": 512, "disk": 10,
+      "servicePort": 443,
+      "sshExtPort": 22001, "serviceExtPort": 50001,
+      "userID": "u_a1b2c3d4",
+      "password": "Ab3Xy9...",
+      "nodeID": "nd_abc123",
+      "region": "nrt",
+      "health": "healthy",
+      "created": "2026-06-21T10:30:00Z"
+    }
+  ]
 }
 ```
 
 | 字段 | 说明 |
 |------|------|
-| `cpu` | CPU 核数 |
-| `mem` | 内存限制 (MB) |
-| `disk` | 磁盘上限 (GB)，0 = 不受限 |
-| `servicePort` | 容器内服务端口 |
-| `sshExtPort` | 外网 SSH 端口 (22000–22999) |
-| `serviceExtPort` | 外网服务端口 (50000–54999) |
-| `userID` | 所属用户的不可变标识 |
-| `token` | 创建时使用的认证 token |
-| `password` | 容器 root 密码（自动生成时） |
-| `nodeID` | 所在节点 ID（空表示本地） |
-| `created` | 创建时间 (UTC) |
+| `id` | 容器名称，唯一标识 |
+| `userID` | 所属用户 ID |
+| `nodeID` | 所在节点 ID（空表示已丢失） |
+| `region` | 区域 ID |
+| `health` | 健康状态：`healthy`/`unhealthy`/`lost`/`stopped` |
 
 ## 容器安全设置
 
