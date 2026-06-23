@@ -1544,6 +1544,7 @@ func cmdServe() {
 			log.Fatal(http.ListenAndServe(":80", redirector))
 		}()
 
+		startHealthCheckLoop()
 		startSyncLoop()
 		select {} // block forever
 	} else if tlsCert != "" && tlsKey != "" {
