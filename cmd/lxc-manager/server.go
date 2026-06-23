@@ -114,28 +114,12 @@ func loadInstances() {
 		log.Fatalf("read instances: %v", err)
 	}
 
-	// Try v1 format first (array with version wrapper), fall back to legacy map format
 	var wrapper struct {
 		Version int              `json:"version"`
 		Records []InstanceRecord `json:"records"`
 	}
-	if err := json.Unmarshal(data, &wrapper); err != nil || wrapper.Version == 0 {
-		// Legacy format: map[string]*InstanceRecord
-		legacy := map[string]*InstanceRecord{}
-		if err := json.Unmarshal(data, &legacy); err != nil {
-			log.Fatalf("parse instances: %v", err)
-		}
-		for name, r := range legacy {
-			r.Name = name
-			if r.Health == "" {
-				r.Health = "healthy"
-			}
-			instances[name] = r
-			usedSSH[r.SSHExtPort] = true
-			usedSvc[r.ServiceExtPort] = true
-		}
-		log.Printf("Loaded %d instance(s) (legacy format, migrated)", len(instances))
-		return
+	if err := json.Unmarshal(data, &wrapper); err != nil {
+		log.Fatalf("parse instances: %v", err)
 	}
 	for i := range wrapper.Records {
 		r := &wrapper.Records[i]

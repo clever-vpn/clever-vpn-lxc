@@ -57,24 +57,13 @@ func loadNodes() {
 		log.Fatalf("read nodes: %v", err)
 	}
 
-	// Try v1 format first, fall back to legacy map format
 	var wrapper struct {
 		Version int          `json:"version"`
 		Records []NodeRecord `json:"records"`
 	}
-	if err := json.Unmarshal(data, &wrapper); err != nil || wrapper.Version == 0 {
-		legacy := map[string]*NodeRecord{}
-		if err := json.Unmarshal(data, &legacy); err != nil {
-			log.Fatalf("parse nodes: %v", err)
-		}
-		for id, rec := range legacy {
-			nodes[id] = rec
-			regionNodes[rec.Region] = append(regionNodes[rec.Region], id)
-		}
-		log.Printf("Loaded %d node(s) (legacy format, migrated)", len(nodes))
-		return
+	if err := json.Unmarshal(data, &wrapper); err != nil {
+		log.Fatalf("parse nodes: %v", err)
 	}
-
 	for i := range wrapper.Records {
 		rec := &wrapper.Records[i]
 		nodes[rec.ID] = rec

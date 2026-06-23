@@ -58,29 +58,15 @@ func loadUsers() {
 		log.Fatalf("read users: %v", err)
 	}
 
-	// Try v1 format first, fall back to legacy map format
 	var wrapper struct {
 		Version int          `json:"version"`
 		Records []UserRecord `json:"records"`
 	}
-	userTokensMu.Lock()
-	defer userTokensMu.Unlock()
-
-	if err := json.Unmarshal(data, &wrapper); err != nil || wrapper.Version == 0 {
-		legacy := map[string]*UserRecord{}
-		if err := json.Unmarshal(data, &legacy); err != nil {
-			log.Fatalf("parse users: %v", err)
-		}
-		for id, rec := range legacy {
-			users[id] = rec
-			for _, tok := range rec.Tokens {
-				userTokens[tok] = id
-			}
-		}
-		log.Printf("Loaded %d user(s), %d token(s) (legacy format, migrated)", len(users), len(userTokens))
-		return
+	if err := json.Unmarshal(data, &wrapper); err != nil {
+		log.Fatalf("parse users: %v", err)
 	}
 
+	userTokensMu.Lock()
 	for i := range wrapper.Records {
 		rec := &wrapper.Records[i]
 		users[rec.ID] = rec
@@ -88,6 +74,8 @@ func loadUsers() {
 			userTokens[tok] = rec.ID
 		}
 	}
+	userTokensMu.Unlock()
+
 	log.Printf("Loaded %d user(s), %d token(s)", len(users), len(userTokens))
 }
 
