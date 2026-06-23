@@ -210,7 +210,7 @@ build_base_image() {
         systemctl enable ssh
 
         # Custom shell prompt: root@clever-vpn:/path#
-        echo '\''export PS1=\"\\[\\e[1;32m\\]root@clever-vpn\\[\\e[0m\\]:\\w# \"'\'' >> /etc/bash.bashrc
+        echo 'export PS1="\\[\\e[1;32m\\]root@clever-vpn\\[\\e[0m\\]:\\w# "' >> /root/.bashrc
     '
 
     # 3. Enable IP forwarding permanently
