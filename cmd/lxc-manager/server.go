@@ -87,6 +87,7 @@ type InstanceRecord struct {
 	Password       string    `json:"password,omitempty"`
 	Node           string    `json:"nodeID"`
 	Region         string    `json:"region"`
+	StaticIP       string    `json:"staticIP,omitempty"`
 	Created        time.Time `json:"created"`
 	Health         string    `json:"health"`
 	HealthReason   string    `json:"healthReason,omitempty"`
@@ -98,7 +99,42 @@ var (
 	instances = map[string]*InstanceRecord{}
 	usedSSH   = map[int]bool{}
 	usedSvc   = map[int]bool{}
+
+	// Static IP pool per node (10.0.1.100 - 10.0.1.250)
+	usedIPs = map[string]map[int]bool{} // nodeID → {suffix: true}
+	ipMu    sync.Mutex
 )
+
+const ipBase = "10.0.1."
+const ipStart = 100
+const ipMax = 250
+
+func allocStaticIP(nodeID string) (string, error) {
+	ipMu.Lock()
+	defer ipMu.Unlock()
+	if usedIPs[nodeID] == nil {
+		usedIPs[nodeID] = map[int]bool{}
+	}
+	for i := ipStart; i <= ipMax; i++ {
+		if !usedIPs[nodeID][i] {
+			usedIPs[nodeID][i] = true
+			return fmt.Sprintf("%s%d", ipBase, i), nil
+		}
+	}
+	return "", fmt.Errorf("no free IP on node %s", nodeID)
+}
+
+func freeStaticIP(nodeID, ip string) {
+	if nodeID == "" || ip == "" || !strings.HasPrefix(ip, ipBase) {
+		return
+	}
+	ipMu.Lock()
+	defer ipMu.Unlock()
+	suffix, err := strconv.Atoi(strings.TrimPrefix(ip, ipBase))
+	if err == nil {
+		delete(usedIPs[nodeID], suffix)
+	}
+}
 
 const (
 	sshPortBase     = 22000
@@ -141,6 +177,16 @@ func loadInstances() {
 		instances[r.Name] = r
 		usedSSH[r.SSHExtPort] = true
 		usedSvc[r.ServiceExtPort] = true
+		// Restore static IP tracking
+		if r.StaticIP != "" && r.Node != "" && strings.HasPrefix(r.StaticIP, ipBase) {
+			suffix, err := strconv.Atoi(strings.TrimPrefix(r.StaticIP, ipBase))
+			if err == nil {
+				if usedIPs[r.Node] == nil {
+					usedIPs[r.Node] = map[int]bool{}
+				}
+				usedIPs[r.Node][suffix] = true
+			}
+		}
 	}
 	log.Printf("Loaded %d instance(s)", len(instances))
 }
@@ -185,6 +231,16 @@ func registerInstance(name string, rec *InstanceRecord) error {
 		usedSSH[ssh] = false
 		return err
 	}
+	// Allocate static IP from node's pool
+	if rec.Node != "" && rec.StaticIP == "" {
+		ip, err := allocStaticIP(rec.Node)
+		if err != nil {
+			usedSSH[ssh] = false
+			usedSvc[svc] = false
+			return fmt.Errorf("alloc IP: %w", err)
+		}
+		rec.StaticIP = ip
+	}
 
 	rec.SSHExtPort = ssh
 	rec.ServiceExtPort = svc
@@ -201,6 +257,7 @@ func unregisterInstance(name string) {
 	if r, ok := instances[name]; ok {
 		delete(usedSSH, r.SSHExtPort)
 		delete(usedSvc, r.ServiceExtPort)
+		freeStaticIP(r.Node, r.StaticIP)
 		delete(instances, name)
 		saveInstances()
 	}
@@ -327,10 +384,15 @@ func recoverInstances() {
 			}
 		}
 
-		vip, err := cli.InstanceIPv4(name, 30*time.Second)
-		if err != nil {
-			log.Printf("  %s: no IP: %v", name, err)
-			continue
+	// Use static IP if available, otherwise poll
+		vip := rec.StaticIP
+		if vip == "" {
+			var err error
+			vip, err = cli.InstanceIPv4(name, 30*time.Second)
+			if err != nil {
+				log.Printf("  %s: no IP: %v", name, err)
+				continue
+			}
 		}
 
 		if err := addPortForward(rec.Node, rec.SSHExtPort, vip, 22); err != nil {
@@ -457,11 +519,11 @@ func handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ports := PortInfo{SSH: rec.SSHExtPort, Service: rec.ServiceExtPort}
-	log.Printf("Creating %s (region=%s node=%s cpu=%d mem=%dMB disk=%dGB ssh=%d svc=%d)",
-		name, region, nodeID, req.CPU, req.Mem, req.Disk, ports.SSH, ports.Service)
+	log.Printf("Creating %s (region=%s node=%s cpu=%d mem=%dMB disk=%dGB ssh=%d svc=%d ip=%s)",
+		name, region, nodeID, req.CPU, req.Mem, req.Disk, ports.SSH, ports.Service, rec.StaticIP)
 
 	userData := mergeUserData(req.UserData, name, bootstrapEnv(name, nodeID, req.CPU, req.Mem, req.Disk, ports), password)
-	if err := cli.CreateContainer(name, img, net, req.CPU, req.Mem, req.Disk, map[string]string{"cloud-init.user-data": userData}); err != nil {
+	if err := cli.CreateContainer(name, img, net, rec.StaticIP, req.CPU, req.Mem, req.Disk, map[string]string{"cloud-init.user-data": userData}); err != nil {
 		unregisterInstance(name)
 		jsonError(w, fmt.Sprintf("create: %v", err), 500)
 		return
@@ -471,24 +533,19 @@ func handleCreate(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, fmt.Sprintf("start: %v", err), 500)
 		return
 	}
-	vip, err := cli.InstanceIPv4(name, 30*time.Second)
-	if err != nil {
-		unregisterInstance(name)
-		jsonError(w, fmt.Sprintf("get ip: %v", err), 500)
-		return
-	}
-	if err := addPortForward(nodeID, ports.SSH, vip, 22); err != nil {
-		unregisterInstance(name)
-		jsonError(w, fmt.Sprintf("forward ssh: %v", err), 500)
-		return
-	}
-	if err := addPortForward(nodeID, ports.Service, vip, req.ServicePort); err != nil {
-		delPortForward(nodeID, ports.SSH, vip, 22)
-		unregisterInstance(name)
-		jsonError(w, fmt.Sprintf("forward svc: %v", err), 500)
-		return
-	}
-	log.Printf("Ports: ssh=%d, svc=%d -> %s", ports.SSH, ports.Service, vip)
+
+	// Port forwarding uses known static IP — no need to wait
+	go func() {
+		if err := addPortForward(nodeID, ports.SSH, rec.StaticIP, 22); err != nil {
+			log.Printf("%s: forward ssh: %v", name, err)
+			return
+		}
+		if err := addPortForward(nodeID, ports.Service, rec.StaticIP, req.ServicePort); err != nil {
+			log.Printf("%s: forward svc: %v", name, err)
+			return
+		}
+		log.Printf("Ports: ssh=%d, svc=%d -> %s", ports.SSH, ports.Service, rec.StaticIP)
+	}()
 
 	resp := CreateResp{Status: "creating", Name: name, Ports: ports, CPU: req.CPU, Mem: req.Mem, Disk: req.Disk, NodeID: nodeID, Region: region, PublicIP: getNodePublicIP(nodeID)}
 	if password != "" {
@@ -977,11 +1034,11 @@ func handleAdminCreateContainer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ports := PortInfo{SSH: rec.SSHExtPort, Service: rec.ServiceExtPort}
-	log.Printf("[Admin] Creating %s for user %s (region=%s node=%s cpu=%d mem=%dMB disk=%dGB)",
-		name, req.UserID, region, nodeID, req.CPU, req.Mem, req.Disk)
+	log.Printf("[Admin] Creating %s for user %s (region=%s node=%s cpu=%d mem=%dMB disk=%dGB ip=%s)",
+		name, req.UserID, region, nodeID, req.CPU, req.Mem, req.Disk, rec.StaticIP)
 
 	userData := mergeUserData(req.UserData, name, bootstrapEnv(name, nodeID, req.CPU, req.Mem, req.Disk, ports), password)
-	if err := cli.CreateContainer(name, img, net, req.CPU, req.Mem, req.Disk, map[string]string{"cloud-init.user-data": userData}); err != nil {
+	if err := cli.CreateContainer(name, img, net, rec.StaticIP, req.CPU, req.Mem, req.Disk, map[string]string{"cloud-init.user-data": userData}); err != nil {
 		unregisterInstance(name)
 		jsonError(w, fmt.Sprintf("create: %v", err), 500)
 		return
@@ -991,23 +1048,19 @@ func handleAdminCreateContainer(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, fmt.Sprintf("start: %v", err), 500)
 		return
 	}
-	vip, err := cli.InstanceIPv4(name, 30*time.Second)
-	if err != nil {
-		unregisterInstance(name)
-		jsonError(w, fmt.Sprintf("get ip: %v", err), 500)
-		return
-	}
-	if err := addPortForward(nodeID, ports.SSH, vip, 22); err != nil {
-		unregisterInstance(name)
-		jsonError(w, fmt.Sprintf("forward ssh: %v", err), 500)
-		return
-	}
-	if err := addPortForward(nodeID, ports.Service, vip, req.ServicePort); err != nil {
-		delPortForward(nodeID, ports.SSH, vip, 22)
-		unregisterInstance(name)
-		jsonError(w, fmt.Sprintf("forward svc: %v", err), 500)
-		return
-	}
+
+	// Port forwarding uses known static IP — no need to wait
+	go func() {
+		if err := addPortForward(nodeID, ports.SSH, rec.StaticIP, 22); err != nil {
+			log.Printf("%s: forward ssh: %v", name, err)
+			return
+		}
+		if err := addPortForward(nodeID, ports.Service, rec.StaticIP, req.ServicePort); err != nil {
+			log.Printf("%s: forward svc: %v", name, err)
+			return
+		}
+		log.Printf("[Admin] Ports: ssh=%d, svc=%d -> %s", ports.SSH, ports.Service, rec.StaticIP)
+	}()
 
 	resp := CreateResp{
 		Status:   "creating",

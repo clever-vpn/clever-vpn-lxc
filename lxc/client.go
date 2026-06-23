@@ -38,12 +38,15 @@ func NewClient(lxdURL string, clientCert string, clientKey string) (*Client, err
 	return &Client{server: server}, nil
 }
 
-func (c *Client) CreateContainer(name, image, network string, cpu int, memMB int, diskGB int, config map[string]string) error {
+func (c *Client) CreateContainer(name, image, network, staticIP string, cpu int, memMB int, diskGB int, config map[string]string) error {
 	devices := map[string]map[string]string{
 		"eth0": {
 			"type":    "nic",
 			"network": network,
 		},
+	}
+	if staticIP != "" {
+		devices["eth0"]["ipv4.address"] = staticIP
 	}
 	if diskGB > 0 {
 		devices["root"] = map[string]string{
@@ -183,6 +186,17 @@ func (c *Client) ResizeContainer(name string, cpu int, memMB int, diskGB int) er
 }
 
 func (c *Client) InstanceIPv4(name string, timeout time.Duration) (string, error) {
+	// Try static IP first (set via ipv4.address)
+	inst, _, err := c.server.GetInstance(name)
+	if err == nil {
+		if dev, ok := inst.Devices["eth0"]; ok {
+			if ip, ok := dev["ipv4.address"]; ok && ip != "" {
+				return ip, nil
+			}
+		}
+	}
+
+	// Fallback: poll DHCP assignment
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		state, _, err := c.server.GetInstanceState(name)
