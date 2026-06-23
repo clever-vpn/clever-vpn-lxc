@@ -124,6 +124,7 @@ func loadInstances() {
 func saveInstances() {
 	data, _ := json.MarshalIndent(instances, "", "  ")
 	os.WriteFile(instFile, data, 0600)
+	triggerSync("instances.json")
 }
 
 func allocPortLocked(base, max int, used map[int]bool) (int, error) {
@@ -1523,7 +1524,7 @@ func cmdServe() {
 			log.Fatal(http.ListenAndServe(":80", redirector))
 		}()
 
-		startBackupLoop()
+		startSyncLoop()
 		select {} // block forever
 	} else if tlsCert != "" && tlsKey != "" {
 		// manual TLS

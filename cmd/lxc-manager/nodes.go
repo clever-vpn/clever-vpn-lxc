@@ -69,6 +69,7 @@ func loadNodes() {
 func saveNodes() {
 	data, _ := json.MarshalIndent(nodes, "", "  ")
 	os.WriteFile(nodesFile, data, 0600)
+	triggerSync("nodes.json")
 }
 
 func addNode(rec *NodeRecord) error {
