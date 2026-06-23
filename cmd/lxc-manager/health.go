@@ -16,7 +16,7 @@ const (
 )
 
 var (
-	healthMu   sync.Mutex
+	healthMu    sync.Mutex
 	healthFails = map[string]int{} // container name → consecutive failures
 )
 

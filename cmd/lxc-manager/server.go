@@ -1746,6 +1746,17 @@ func cmdServe() {
 	applyCLIOverrides()
 	resolveBackupEnv()
 
+	// Auto-restore from R2 if no local state exists
+	if cfg.Backup.Enabled {
+		instPath := filepathJoin(ensureDataDir(), "instances.json")
+		if _, err := os.Stat(instPath); os.IsNotExist(err) {
+			log.Printf("No local state found, attempting restore from R2...")
+			if err := restoreFromR2(); err != nil {
+				log.Printf("R2 restore: %v (starting fresh)", err)
+			}
+		}
+	}
+
 	loadUsers()
 	loadAdminPassword()
 	loadAdminTokens()
