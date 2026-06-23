@@ -100,3 +100,8 @@ variable "backup_interval" {
   type    = string
   default = "1h"
 }
+
+variable "letsencrypt_staging" {
+  type    = bool
+  default = false
+}

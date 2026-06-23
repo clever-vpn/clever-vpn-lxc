@@ -10,17 +10,18 @@ import (
 
 // Config holds all configuration, loadable from JSON file and overridable by CLI.
 type Config struct {
-	Domain         string       `json:"domain"`
-	Port           string       `json:"port"`
-	TLSCert        string       `json:"tls_cert"`
-	TLSKey         string       `json:"tls_key"`
-	LXDClientCert  string       `json:"lxd_client_cert"`
-	LXDClientKey   string       `json:"lxd_client_key"`
-	LXDURL         string       `json:"lxd_url"`
-	LXDBaseImage   string       `json:"lxd_base_image"`
-	LXDNetwork     string       `json:"lxd_network"`
-	LXCNamePrefix  string       `json:"lxc_name_prefix"`
-	Backup         BackupConfig `json:"backup"`
+	Domain             string       `json:"domain"`
+	Port               string       `json:"port"`
+	TLSCert            string       `json:"tls_cert"`
+	TLSKey             string       `json:"tls_key"`
+	LetsEncryptStaging  bool         `json:"letsencrypt_staging"`
+	LXDClientCert      string       `json:"lxd_client_cert"`
+	LXDClientKey       string       `json:"lxd_client_key"`
+	LXDURL             string       `json:"lxd_url"`
+	LXDBaseImage       string       `json:"lxd_base_image"`
+	LXDNetwork         string       `json:"lxd_network"`
+	LXCNamePrefix      string       `json:"lxc_name_prefix"`
+	Backup             BackupConfig `json:"backup"`
 }
 
 // BackupConfig holds R2 backup settings.

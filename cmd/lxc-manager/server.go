@@ -1795,11 +1795,16 @@ func cmdServe() {
 			log.Fatal("CF_DNS_API_TOKEN env var is required for DNS-01 certificate issuance")
 		}
 
-		cfg := certmagic.NewDefault()
-		cfg.Storage = &certmagic.FileStorage{Path: certDir}
+		cm := certmagic.NewDefault()
+		cm.Storage = &certmagic.FileStorage{Path: certDir}
 
-		issuer := certmagic.NewACMEIssuer(cfg, certmagic.ACMEIssuer{
-			CA:     certmagic.LetsEncryptProductionCA,
+		ca := certmagic.LetsEncryptProductionCA
+		if cfg.LetsEncryptStaging {
+			ca = certmagic.LetsEncryptStagingCA
+		}
+
+		issuer := certmagic.NewACMEIssuer(cm, certmagic.ACMEIssuer{
+			CA:     ca,
 			Email:  "",
 			Agreed: true,
 			DNS01Solver: &certmagic.DNS01Solver{
@@ -1808,17 +1813,17 @@ func cmdServe() {
 				},
 			},
 		})
-		cfg.Issuers = []certmagic.Issuer{issuer}
+		cm.Issuers = []certmagic.Issuer{issuer}
 
 		// Obtain certificate (blocks until ready)
 		ctx := context.Background()
-		if err := cfg.ManageSync(ctx, []string{domain}); err != nil {
+		if err := cm.ManageSync(ctx, []string{domain}); err != nil {
 			log.Fatalf("certmagic manage: %v", err)
 		}
 
 		srv := &http.Server{
 			Addr:      ":443",
-			TLSConfig: cfg.TLSConfig(),
+			TLSConfig: cm.TLSConfig(),
 		}
 
 		log.Printf("LXC Manager on https://%s (DNS-01 via certmagic)", domain)
