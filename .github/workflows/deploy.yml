@@ -16,7 +16,7 @@ on:
         type: string
         default: 'latest'
       letsencrypt_staging:
-        description: 'Use Let\'s Encrypt staging CA (for testing)'
+        description: 'Use Let''s Encrypt staging CA (for testing)'
         required: false
         type: boolean
         default: true
