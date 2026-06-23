@@ -6,10 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"os"
-	"os/exec"
 
-	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
 )
 
@@ -65,6 +62,13 @@ func handleTerminalWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Get the LXD client for this container (works for local and remote nodes)
+	cli := clientForInstance(name)
+	if cli == nil {
+		http.Error(w, "no LXD connection available for this container", 503)
+		return
+	}
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("terminal ws upgrade: %v", err)
@@ -72,41 +76,41 @@ func handleTerminalWS(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	// Run lxc exec inside the container
-	cmd := exec.Command("lxc", "exec", name, "--", "/bin/login", "-f", "root")
-	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+	// Bridge browser WebSocket ↔ LXD exec
+	stdinR, stdinW := io.Pipe()
+	stdoutR, stdoutW := io.Pipe()
 
-	f, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 24, Cols: 80})
-	if err != nil {
-		log.Printf("terminal pty start: %v", err)
-		conn.WriteMessage(websocket.TextMessage, []byte("Failed to start terminal: "+err.Error()))
-		return
-	}
-	defer f.Close()
-
-	// Forward WebSocket → PTY
+	// Browser WS → container stdin
 	go func() {
+		defer stdinW.Close()
 		for {
 			_, msg, err := conn.ReadMessage()
 			if err != nil {
 				return
 			}
-			f.Write(msg)
+			stdinW.Write(msg)
 		}
 	}()
 
-	// Forward PTY → WebSocket
-	buf := make([]byte, 4096)
-	for {
-		n, err := f.Read(buf)
-		if err != nil {
-			if err != io.EOF {
-				log.Printf("terminal pty read: %v", err)
+	// Container stdout → Browser WS
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := stdoutR.Read(buf)
+			if err != nil {
+				return
 			}
-			return
+			if err := conn.WriteMessage(websocket.BinaryMessage, buf[:n]); err != nil {
+				return
+			}
 		}
-		if err := conn.WriteMessage(websocket.BinaryMessage, buf[:n]); err != nil {
-			return
-		}
+	}()
+
+	if err := cli.ExecInteractive(name, []string{"/bin/login", "-f", "root"},
+		map[string]string{"TERM": "xterm-256color"},
+		stdinR, stdoutW, nil,
+	); err != nil {
+		log.Printf("terminal exec %s: %v", name, err)
+		conn.WriteMessage(websocket.TextMessage, []byte("Connection lost: "+err.Error()))
 	}
 }
