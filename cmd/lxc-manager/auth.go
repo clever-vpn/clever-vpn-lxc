@@ -73,6 +73,7 @@ func loadUsers() {
 
 // saveUsers persists user records (including tokens) to users.json.
 func saveUsers() {
+	defer triggerSync("users.json")
 	data, _ := json.MarshalIndent(users, "", "  ")
 	os.WriteFile(usersFile, data, 0600)
 }

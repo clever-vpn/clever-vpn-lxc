@@ -208,6 +208,9 @@ build_base_image() {
         sed -ri "s/^#?PermitRootLogin.*/PermitRootLogin yes/" /etc/ssh/sshd_config
         sed -ri "s/^#?PasswordAuthentication.*/PasswordAuthentication yes/" /etc/ssh/sshd_config
         systemctl enable ssh
+
+        # Custom shell prompt
+        echo '\''export PS1=\"\\[\\e[1;32m\\]clever-vpn\\[\\e[0m\\]:\\w\\$ \"'\'' >> /etc/bash.bashrc
     '
 
     # 3. Enable IP forwarding permanently

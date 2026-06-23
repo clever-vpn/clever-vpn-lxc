@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -193,6 +194,7 @@ func restoreFromR2() error {
 }
 
 // startBackupLoop runs periodic backups in the background.
+// Deprecated: replaced by startSyncLoop for event-driven sync.
 func startBackupLoop() {
 	if !cfg.Backup.Enabled {
 		return
@@ -206,13 +208,123 @@ func startBackupLoop() {
 
 	log.Printf("Backup: enabled, every %s", d)
 	go func() {
-		// Run once at startup
 		time.Sleep(30 * time.Second)
 		for {
 			if err := backupToR2(); err != nil {
 				log.Printf("Backup: %v", err)
 			}
 			time.Sleep(d)
+		}
+	}()
+}
+
+// ==================== Event-driven sync ====================
+
+// syncChan receives filenames that need syncing to R2.
+var syncChan = make(chan string, 16)
+
+// triggerSync signals that a file has changed and should be synced to R2.
+func triggerSync(filename string) {
+	select {
+	case syncChan <- filename:
+	default:
+		// channel full, drop (next sync will pick up latest state)
+	}
+}
+
+// syncFileToR2 uploads a single file to R2.
+func syncFileToR2(filename string) error {
+	bc := cfg.Backup
+	if !bc.Enabled {
+		return nil
+	}
+
+	accessKey := resolveEnv(bc.R2AccessKeyID)
+	secretKey := resolveEnv(bc.R2SecretAccessKey)
+	if accessKey == "" {
+		accessKey = os.Getenv("R2_ACCESS_KEY_ID")
+	}
+	if secretKey == "" {
+		secretKey = os.Getenv("R2_SECRET_ACCESS_KEY")
+	}
+
+	cred := credentials.NewStaticCredentialsProvider(accessKey, secretKey, "")
+
+	resolver := aws.EndpointResolverWithOptionsFunc(func(service, region string, options ...interface{}) (aws.Endpoint, error) {
+		return aws.Endpoint{
+			URL:               bc.R2Endpoint,
+			HostnameImmutable: true,
+			SigningRegion:     "auto",
+			Source:            aws.EndpointSourceCustom,
+		}, nil
+	})
+
+	awscfg, err := config.LoadDefaultConfig(context.Background(),
+		config.WithCredentialsProvider(cred),
+		config.WithEndpointResolverWithOptions(resolver),
+		config.WithRegion("auto"),
+	)
+	if err != nil {
+		return fmt.Errorf("s3 config: %w", err)
+	}
+
+	client := s3.NewFromConfig(awscfg)
+
+	dataDir := ensureDataDir()
+	localPath := filepath.Join(dataDir, filename)
+
+	data, err := os.ReadFile(localPath)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", filename, err)
+	}
+
+	_, err = client.PutObject(context.Background(), &s3.PutObjectInput{
+		Bucket: aws.String(bc.R2Bucket),
+		Key:    aws.String(filename),
+		Body:   bytes.NewReader(data),
+	})
+	if err != nil {
+		return fmt.Errorf("put %s: %w", filename, err)
+	}
+
+	log.Printf("Sync: %s synced to R2", filename)
+	return nil
+}
+
+// startSyncLoop runs event-driven R2 sync with debounce.
+// When a file changes, it waits for a quiet period (no more changes to the same file
+// for syncDebounce) before uploading to R2.
+func startSyncLoop() {
+	if !cfg.Backup.Enabled {
+		return
+	}
+
+	const syncDebounce = 60 * time.Second
+
+	log.Printf("Sync: event-driven, debounce %s", syncDebounce)
+
+	go func() {
+		pending := map[string]time.Time{}
+
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case filename := <-syncChan:
+				pending[filename] = time.Now()
+
+			case <-ticker.C:
+				now := time.Now()
+				for f, t := range pending {
+					if now.Sub(t) >= syncDebounce {
+						if err := syncFileToR2(f); err != nil {
+							log.Printf("Sync: %v", err)
+						}
+						delete(pending, f)
+					}
+				}
+			}
 		}
 	}()
 }
