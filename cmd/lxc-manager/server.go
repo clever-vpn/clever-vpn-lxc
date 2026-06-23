@@ -482,7 +482,7 @@ func handleCreate(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Creating %s (region=%s node=%s cpu=%d mem=%dMB disk=%dGB ssh=%d svc=%d)",
 		name, region, nodeID, req.CPU, req.Mem, req.Disk, ports.SSH, ports.Service)
 
-	userData := mergeUserData(req.UserData, name, bootstrapEnv(name, req.CPU, req.Mem, req.Disk, ports), password)
+	userData := mergeUserData(req.UserData, name, bootstrapEnv(name, nodeID, req.CPU, req.Mem, req.Disk, ports), password)
 	if err := cli.CreateContainer(name, img, net, req.CPU, req.Mem, req.Disk, map[string]string{"cloud-init.user-data": userData}); err != nil {
 		unregisterInstance(name)
 		jsonError(w, fmt.Sprintf("create: %v", err), 500)
@@ -999,7 +999,7 @@ func handleAdminCreateContainer(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[Admin] Creating %s for user %s (region=%s node=%s cpu=%d mem=%dMB disk=%dGB)",
 		name, req.UserID, region, nodeID, req.CPU, req.Mem, req.Disk)
 
-	userData := mergeUserData(req.UserData, name, bootstrapEnv(name, req.CPU, req.Mem, req.Disk, ports), password)
+	userData := mergeUserData(req.UserData, name, bootstrapEnv(name, nodeID, req.CPU, req.Mem, req.Disk, ports), password)
 	if err := cli.CreateContainer(name, img, net, req.CPU, req.Mem, req.Disk, map[string]string{"cloud-init.user-data": userData}); err != nil {
 		unregisterInstance(name)
 		jsonError(w, fmt.Sprintf("create: %v", err), 500)
@@ -1837,7 +1837,7 @@ func indent(s, prefix string) string {
 	return strings.Join(lines, "\n")
 }
 
-func bootstrapEnv(name string, cpu, mem, disk int, ports PortInfo) string {
+func bootstrapEnv(name, nodeID string, cpu, mem, disk int, ports PortInfo) string {
 	return strings.Join([]string{
 		envLine("INSTANCE_NAME", name),
 		envLine("INSTANCE_CPU", strconv.Itoa(cpu)),
@@ -1845,6 +1845,7 @@ func bootstrapEnv(name string, cpu, mem, disk int, ports PortInfo) string {
 		envLine("INSTANCE_DISK_GB", strconv.Itoa(disk)),
 		envLine("INSTANCE_SSH_PORT", strconv.Itoa(ports.SSH)),
 		envLine("INSTANCE_SERVICE_PORT", strconv.Itoa(ports.Service)),
+		envLine("INSTANCE_PUBLIC_IP", getNodePublicIP(nodeID)),
 	}, "\n") + "\n"
 }
 
