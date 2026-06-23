@@ -105,3 +105,8 @@ variable "letsencrypt_staging" {
   type    = bool
   default = false
 }
+
+variable "storage_pool_size" {
+  type    = string
+  default = "15"
+}

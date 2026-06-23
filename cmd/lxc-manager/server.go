@@ -1277,6 +1277,7 @@ func handleNodeAdd(w http.ResponseWriter, r *http.Request) {
 		SSHHost     string `json:"sshHost"`
 		SSHPort     int    `json:"sshPort"`
 		SSHPassword string `json:"sshPassword"`
+		PoolSize    string `json:"poolSize"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "invalid body", 400)
@@ -1290,7 +1291,7 @@ func handleNodeAdd(w http.ResponseWriter, r *http.Request) {
 		req.SSHPort = 22
 	}
 
-	rec, err := provisionNode(req.Name, req.Region, req.SSHHost, req.SSHPort, req.SSHPassword)
+	rec, err := provisionNode(req.Name, req.Region, req.SSHHost, req.SSHPort, req.SSHPassword, req.PoolSize)
 	if err != nil {
 		jsonError(w, fmt.Sprintf("provision: %v", err), 500)
 		return

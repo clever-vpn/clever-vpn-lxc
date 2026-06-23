@@ -262,17 +262,22 @@ func cmdRenameUser() {
 
 func cmdAddNode() {
 	if len(os.Args) < 5 {
-		fmt.Fprintf(os.Stderr, "Usage: lxc-manager add-node <name> <host> <region> [--port PORT]\n")
+		fmt.Fprintf(os.Stderr, "Usage: lxc-manager add-node <name> <host> <region> [--port PORT] [--pool-size SIZE]\n")
 		fmt.Fprintf(os.Stderr, "  SSH password is read from SSH_PASSWORD env var or stdin.\n")
+		fmt.Fprintf(os.Stderr, "  --pool-size SIZE  btrfs pool size in GiB (default from config or 15).\n")
 		os.Exit(1)
 	}
 	name := os.Args[2]
 	host := os.Args[3]
 	region := os.Args[4]
 	port := 22
+	poolSize := ""
 	for i := 5; i < len(os.Args); i++ {
 		if os.Args[i] == "--port" && i+1 < len(os.Args) {
 			fmt.Sscanf(os.Args[i+1], "%d", &port)
+			i++
+		} else if os.Args[i] == "--pool-size" && i+1 < len(os.Args) {
+			poolSize = os.Args[i+1]
 			i++
 		}
 	}
@@ -288,7 +293,7 @@ func cmdAddNode() {
 	}
 
 	loadNodes()
-	rec, err := provisionNode(name, region, host, port, password)
+	rec, err := provisionNode(name, region, host, port, password, poolSize)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Provision failed: %v\n", err)
 		os.Exit(1)
