@@ -249,32 +249,27 @@ func removeNodeClient(nodeID string) {
 	delete(pool, nodeID)
 }
 
-var localClient *lxc.Client
-
 func getDefaultClient() (*lxc.Client, error) {
-	_, c, err := getDefaultNodeClient()
-	return c, err
+	if len(nodes) == 0 {
+		return nil, fmt.Errorf("no nodes registered, add a node first: lxc-manager add-node")
+	}
+	for id := range nodes {
+		return getNodeClient(id)
+	}
+	return nil, fmt.Errorf("no nodes available")
 }
 
-// getDefaultNodeClient returns a node ID and LXD client. When no registered
-// nodes exist, falls back to the local LXD socket with an empty node ID.
+// getDefaultNodeClient returns a node ID and LXD client.
+// Returns an error if no nodes are registered.
 func getDefaultNodeClient() (string, *lxc.Client, error) {
-	if len(nodes) > 0 {
-		for id := range nodes {
-			c, err := getNodeClient(id)
-			return id, c, err
-		}
+	if len(nodes) == 0 {
+		return "", nil, fmt.Errorf("no nodes registered, add a node first: lxc-manager add-node")
 	}
-	if localClient == nil {
-		clientCert := loadFile(env("LXD_CLIENT_CERT", "client.crt"))
-		clientKey := loadFile(env("LXD_CLIENT_KEY", "client.key"))
-		c, err := lxc.NewClient(env("LXD_URL", "https://127.0.0.1:8443"), clientCert, clientKey)
-		if err != nil {
-			return "", nil, err
-		}
-		localClient = c
+	for id := range nodes {
+		c, err := getNodeClient(id)
+		return id, c, err
 	}
-	return "", localClient, nil
+	return "", nil, fmt.Errorf("no nodes available")
 }
 
 // cleanupOrphanContainers finds containers on a node that are not in our
@@ -424,8 +419,18 @@ func provisionNode(name, region, host string, port int, password string) (*NodeR
 
 // ==================== Remote Port Forwarding ====================
 
-// nodeIPTables runs an iptables command on a remote node via SSH.
-func nodeIPTables(nodeID string, args ...string) error {
+// addRemotePortForward adds DNAT rules on a remote node via SSH.
+func addRemotePortForward(nodeID string, extPort int, dstIP string, dstPort int) error {
+	return nodeIPTables(nodeID, "-A", strconv.Itoa(extPort), dstIP, strconv.Itoa(dstPort))
+}
+
+// delRemotePortForward removes DNAT rules on a remote node via SSH.
+func delRemotePortForward(nodeID string, extPort int, dstIP string, dstPort int) {
+	nodeIPTables(nodeID, "-D", strconv.Itoa(extPort), dstIP, strconv.Itoa(dstPort))
+}
+
+// nodeIPTables runs iptables DNAT commands on a remote node via SSH.
+func nodeIPTables(nodeID, action, extPort, dstIP, dstPort string) error {
 	nodesMu.Lock()
 	n, ok := nodes[nodeID]
 	nodesMu.Unlock()
@@ -439,35 +444,27 @@ func nodeIPTables(nodeID string, args ...string) error {
 	}
 	defer client.Close()
 
-	cmd := "iptables -t nat " + strings.Join(args, " ")
-	out, err := sshExec(client, cmd)
-	if err != nil {
-		return fmt.Errorf("iptables %s: %w\n%s", n.SSHHost, err, out)
-	}
-	return nil
-}
-
-// addNodePortForward adds DNAT rules on a remote node.
-func addNodePortForward(nodeID string, extPort int, dstIP string, dstPort int) error {
-	target := fmt.Sprintf("%s:%d", dstIP, dstPort)
-	ext := strconv.Itoa(extPort)
+	target := fmt.Sprintf("%s:%s", dstIP, dstPort)
 	for _, proto := range []string{"tcp", "udp"} {
 		for _, chain := range []string{"PREROUTING", "OUTPUT"} {
-			if err := nodeIPTables(nodeID, "-A", chain, "-p", proto, "--dport", ext, "-j", "DNAT", "--to", target); err != nil {
-				return err
+			cmd := fmt.Sprintf("iptables -t nat -C %s -p %s --dport %s -j DNAT --to %s 2>/dev/null",
+				chain, proto, extPort, target)
+			out, err := sshExec(client, cmd)
+			if err == nil {
+				// Rule exists, skip add for -A; for -D, proceed to delete
+				if action == "-A" {
+					continue
+				}
+			}
+			_ = out
+
+			addCmd := fmt.Sprintf("iptables -t nat %s %s -p %s --dport %s -j DNAT --to %s",
+				action, chain, proto, extPort, target)
+			out, err = sshExec(client, addCmd)
+			if err != nil && action == "-A" {
+				return fmt.Errorf("iptables %s: %w\n%s", n.SSHHost, err, out)
 			}
 		}
 	}
 	return nil
-}
-
-// delNodePortForward removes DNAT rules on a remote node.
-func delNodePortForward(nodeID string, extPort int, dstIP string, dstPort int) {
-	target := fmt.Sprintf("%s:%d", dstIP, dstPort)
-	ext := strconv.Itoa(extPort)
-	for _, proto := range []string{"tcp", "udp"} {
-		for _, chain := range []string{"PREROUTING", "OUTPUT"} {
-			nodeIPTables(nodeID, "-D", chain, "-p", proto, "--dport", ext, "-j", "DNAT", "--to", target)
-		}
-	}
 }
