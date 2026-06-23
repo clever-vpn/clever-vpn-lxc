@@ -47,6 +47,50 @@ func checkAllContainers() {
 	for _, name := range names {
 		checkContainer(name)
 	}
+
+	// Also check node health
+	checkAllNodes()
+}
+
+func checkAllNodes() {
+	nodesMu.Lock()
+	nodeList := make([]*NodeRecord, 0, len(nodes))
+	for _, n := range nodes {
+		nodeList = append(nodeList, n)
+	}
+	nodesMu.Unlock()
+
+	for _, n := range nodeList {
+		checkNodeHealth(n.ID)
+	}
+}
+
+func checkNodeHealth(nodeID string) {
+	nodesMu.Lock()
+	n, ok := nodes[nodeID]
+	nodesMu.Unlock()
+	if !ok {
+		return
+	}
+
+	if n.Status == "rebuilding" {
+		return // don't interfere with rebuild
+	}
+
+	cli, err := getNodeClient(nodeID)
+	if err != nil {
+		setNodeStatus(nodeID, "offline", fmt.Sprintf("connect: %v", err))
+		return
+	}
+
+	// Simple ping via LXD API
+	_, err = cli.ListContainers("")
+	if err != nil {
+		setNodeStatus(nodeID, "offline", fmt.Sprintf("lxd unreachable: %v", err))
+		return
+	}
+
+	setNodeStatus(nodeID, "active", "")
 }
 
 func checkContainer(name string) {
