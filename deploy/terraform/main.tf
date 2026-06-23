@@ -29,6 +29,7 @@ locals {
     r2_access_key_id      = var.r2_access_key_id
     r2_secret_access_key  = var.r2_secret_access_key
     backup_interval       = var.backup_interval
+    letsencrypt_staging   = var.letsencrypt_staging
   })
 }
 

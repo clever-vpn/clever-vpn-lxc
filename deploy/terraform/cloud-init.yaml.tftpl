@@ -20,6 +20,7 @@ write_files:
       {
         "domain": "${fqdn}",
         "port": "443",
+        "letsencrypt_staging": ${letsencrypt_staging},
         "lxd_client_cert": "/etc/lxc-manager/client.crt",
         "lxd_client_key": "/etc/lxc-manager/client.key",
         "backup": {
