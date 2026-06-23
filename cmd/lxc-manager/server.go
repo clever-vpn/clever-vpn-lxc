@@ -45,6 +45,7 @@ type CreateResp struct {
 	Mem      int      `json:"mem"`
 	Disk     int      `json:"disk"`
 	NodeID   string   `json:"nodeID"`
+	Region   string   `json:"region"`
 }
 
 type PortInfo struct {
@@ -501,7 +502,7 @@ func handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("Ports: ssh=%d, svc=%d -> %s", ports.SSH, ports.Service, vip)
 
-	resp := CreateResp{Status: "creating", Name: name, Ports: ports, CPU: req.CPU, Mem: req.Mem, Disk: req.Disk, NodeID: nodeID}
+	resp := CreateResp{Status: "creating", Name: name, Ports: ports, CPU: req.CPU, Mem: req.Mem, Disk: req.Disk, NodeID: nodeID, Region: region}
 	if password != "" {
 		resp.Password = password
 	}
@@ -1007,6 +1008,7 @@ func handleAdminCreateContainer(w http.ResponseWriter, r *http.Request) {
 		Mem:      req.Mem,
 		Disk:     req.Disk,
 		NodeID:   nodeID,
+		Region:   region,
 	}
 	jsonOK(w, resp)
 
