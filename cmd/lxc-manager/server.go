@@ -963,7 +963,7 @@ func handleAdminCreateContainer(w http.ResponseWriter, r *http.Request) {
 		ServicePort: req.ServicePort,
 		UserID:      req.UserID,
 		Node:        nodeID,
-		Region:      req.Region,
+		Region:      region,
 		Health:      "healthy",
 	}
 
