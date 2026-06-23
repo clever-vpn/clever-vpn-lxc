@@ -410,6 +410,121 @@ func recoverInstances() {
 
 // ==================== Container Handlers ====================
 
+// createContainerCore handles the shared container creation flow.
+// Returns the instance record and port info on success.
+func createContainerCore(userID string, userData string, cpu, mem, disk, servicePort int, region string, planID string) (*InstanceRecord, PortInfo, error) {
+	if servicePort <= 0 || servicePort > 65535 {
+		return nil, PortInfo{}, fmt.Errorf("servicePort required (1-65535)")
+	}
+
+	var cli *lxc.Client
+	var nodeID string
+
+	if region != "" {
+		var err error
+		nodeID, cli, err = pickNode(region)
+		if err != nil {
+			return nil, PortInfo{}, fmt.Errorf("region %s: %v", region, err)
+		}
+	} else {
+		var err error
+		nodeID, cli, err = getDefaultNodeClient()
+		if err != nil {
+			return nil, PortInfo{}, fmt.Errorf("no nodes available")
+		}
+		if nodeID != "" {
+			nodesMu.Lock()
+			if n, ok := nodes[nodeID]; ok {
+				region = n.Region
+			}
+			nodesMu.Unlock()
+		}
+	}
+	if cli == nil {
+		return nil, PortInfo{}, fmt.Errorf("no nodes available")
+	}
+
+	// Resolve plan
+	if planID != "" {
+		plansMu.Lock()
+		p, ok := plans[planID]
+		plansMu.Unlock()
+		if !ok {
+			return nil, PortInfo{}, fmt.Errorf("plan %s not found", planID)
+		}
+		if cpu <= 0 {
+			cpu = p.VcpuCount
+		}
+		if mem <= 0 {
+			mem = p.RAM
+		}
+		if disk <= 0 {
+			disk = p.Disk
+		}
+	}
+	if cpu <= 0 {
+		cpu = 1
+	}
+	if mem <= 0 {
+		mem = 512
+	}
+
+	name := env("LXC_NAME_PREFIX", "user-") + generateUUID()
+	img := env("LXC_BASE_IMAGE", "clever-vpn-base")
+	net := env("LXC_NETWORK", "vpnbr0")
+
+	rec := &InstanceRecord{
+		Name:        name,
+		CPU:         cpu,
+		Mem:         mem,
+		Disk:        disk,
+		ServicePort: servicePort,
+		UserID:      userID,
+		Node:        nodeID,
+		Region:      region,
+		Health:      "healthy",
+	}
+
+	password := ""
+	if strings.TrimSpace(userData) == "" {
+		password = genPasswd()
+		rec.Password = password
+	}
+
+	if err := registerInstance(name, rec); err != nil {
+		return nil, PortInfo{}, fmt.Errorf("register: %v", err)
+	}
+
+	ports := PortInfo{SSH: rec.SSHExtPort, Service: rec.ServiceExtPort}
+	log.Printf("Creating %s (user=%s region=%s node=%s cpu=%d mem=%dMB disk=%dGB ssh=%d svc=%d ip=%s)",
+		name, userID, region, nodeID, cpu, mem, disk, ports.SSH, ports.Service, rec.StaticIP)
+
+	cloudConfig := mergeUserData(userData, name, bootstrapEnv(name, nodeID, cpu, mem, disk, ports), password)
+	if err := cli.CreateContainer(name, img, net, rec.StaticIP, cpu, mem, disk, map[string]string{"cloud-init.user-data": cloudConfig}); err != nil {
+		unregisterInstance(name)
+		return nil, PortInfo{}, fmt.Errorf("create: %v", err)
+	}
+	if err := cli.StartContainer(name); err != nil {
+		unregisterInstance(name)
+		return nil, PortInfo{}, fmt.Errorf("start: %v", err)
+	}
+
+	// Port forwarding uses known static IP — no need to wait
+	go func() {
+		if err := addPortForward(nodeID, ports.SSH, rec.StaticIP, 22); err != nil {
+			log.Printf("%s: forward ssh: %v", name, err)
+			return
+		}
+		if err := addPortForward(nodeID, ports.Service, rec.StaticIP, servicePort); err != nil {
+			log.Printf("%s: forward svc: %v", name, err)
+			return
+		}
+		log.Printf("Ports: ssh=%d, svc=%d -> %s", ports.SSH, ports.Service, rec.StaticIP)
+	}()
+
+	return rec, ports, nil
+}
+
 func handleCreate(w http.ResponseWriter, r *http.Request) {
 	ok, userID := validateUser(r)
 	if !ok {
@@ -422,134 +537,16 @@ func handleCreate(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "invalid body", 400)
 		return
 	}
-	if req.ServicePort <= 0 || req.ServicePort > 65535 {
-		jsonError(w, "servicePort required (1-65535)", 400)
-		return
-	}
-	if req.CPU <= 0 {
-		req.CPU = 1
-	}
-	if req.Mem <= 0 {
-		req.Mem = 512
-	}
 
-	var cli *lxc.Client
-	var nodeID string
-	region := req.Region
-
-	if region != "" {
-		var err error
-		nodeID, cli, err = pickNode(region)
-		if err != nil {
-			jsonError(w, fmt.Sprintf("region %s: %v", region, err), 400)
-			return
-		}
-	} else {
-		var err error
-		nodeID, cli, err = getDefaultNodeClient()
-		if err != nil {
-			jsonError(w, "no nodes available, add a node first: lxc-manager add-node", 400)
-			return
-		}
-		// Infer region from the selected node
-		if nodeID != "" {
-			nodesMu.Lock()
-			if n, ok := nodes[nodeID]; ok {
-				region = n.Region
-			}
-			nodesMu.Unlock()
-		}
-	}
-	if cli == nil {
-		jsonError(w, "no nodes available, add a node first: lxc-manager add-node", 400)
+	rec, ports, err := createContainerCore(userID, req.UserData, req.CPU, req.Mem, req.Disk, req.ServicePort, req.Region, req.PlanID)
+	if err != nil {
+		jsonError(w, err.Error(), 400)
 		return
 	}
 
-	// Resolve plan if planId is provided
-	if req.PlanID != "" {
-		plansMu.Lock()
-		p, ok := plans[req.PlanID]
-		plansMu.Unlock()
-		if !ok {
-			jsonError(w, fmt.Sprintf("plan %s not found", req.PlanID), 400)
-			return
-		}
-		if req.CPU <= 0 {
-			req.CPU = p.VcpuCount
-		}
-		if req.Mem <= 0 {
-			req.Mem = p.RAM
-		}
-		if req.Disk <= 0 {
-			req.Disk = p.Disk
-		}
-	}
-	if req.CPU <= 0 {
-		req.CPU = 1
-	}
-	if req.Mem <= 0 {
-		req.Mem = 512
-	}
-
-	name := env("LXC_NAME_PREFIX", "user-") + generateUUID()
-	img := env("LXC_BASE_IMAGE", "clever-vpn-base")
-	net := env("LXC_NETWORK", "vpnbr0")
-
-	rec := &InstanceRecord{
-		Name:        name,
-		CPU:         req.CPU,
-		Mem:         req.Mem,
-		Disk:        req.Disk,
-		ServicePort: req.ServicePort,
-		UserID:      userID,
-		Node:        nodeID,
-		Region:      region,
-		Health:      "healthy",
-	}
-
-	password := ""
-	if strings.TrimSpace(req.UserData) == "" {
-		password = genPasswd()
-		rec.Password = password
-	}
-
-	if err := registerInstance(name, rec); err != nil {
-		jsonError(w, fmt.Sprintf("register: %v", err), 500)
-		return
-	}
-
-	ports := PortInfo{SSH: rec.SSHExtPort, Service: rec.ServiceExtPort}
-	log.Printf("Creating %s (region=%s node=%s cpu=%d mem=%dMB disk=%dGB ssh=%d svc=%d ip=%s)",
-		name, region, nodeID, req.CPU, req.Mem, req.Disk, ports.SSH, ports.Service, rec.StaticIP)
-
-	userData := mergeUserData(req.UserData, name, bootstrapEnv(name, nodeID, req.CPU, req.Mem, req.Disk, ports), password)
-	if err := cli.CreateContainer(name, img, net, rec.StaticIP, req.CPU, req.Mem, req.Disk, map[string]string{"cloud-init.user-data": userData}); err != nil {
-		unregisterInstance(name)
-		jsonError(w, fmt.Sprintf("create: %v", err), 500)
-		return
-	}
-	if err := cli.StartContainer(name); err != nil {
-		unregisterInstance(name)
-		jsonError(w, fmt.Sprintf("start: %v", err), 500)
-		return
-	}
-
-	// Port forwarding uses known static IP — no need to wait
-	go func() {
-		if err := addPortForward(nodeID, ports.SSH, rec.StaticIP, 22); err != nil {
-			log.Printf("%s: forward ssh: %v", name, err)
-			return
-		}
-		if err := addPortForward(nodeID, ports.Service, rec.StaticIP, req.ServicePort); err != nil {
-			log.Printf("%s: forward svc: %v", name, err)
-			return
-		}
-		log.Printf("Ports: ssh=%d, svc=%d -> %s", ports.SSH, ports.Service, rec.StaticIP)
-	}()
-
-	resp := CreateResp{Status: "creating", Name: name, Ports: ports, CPU: req.CPU, Mem: req.Mem, Disk: req.Disk, NodeID: nodeID, Region: region, PublicIP: getNodePublicIP(nodeID)}
-	if password != "" {
-		resp.Password = password
+	resp := CreateResp{Status: "creating", Name: rec.Name, Ports: ports, CPU: rec.CPU, Mem: rec.Mem, Disk: rec.Disk, NodeID: rec.Node, Region: rec.Region, PublicIP: getNodePublicIP(rec.Node)}
+	if rec.Password != "" {
+		resp.Password = rec.Password
 	}
 	jsonOK(w, resp)
 }
@@ -934,149 +931,24 @@ func handleAdminCreateContainer(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "userID required", 400)
 		return
 	}
-	if req.ServicePort <= 0 || req.ServicePort > 65535 {
-		jsonError(w, "servicePort required (1-65535)", 400)
-		return
-	}
-	if req.CPU <= 0 {
-		req.CPU = 1
-	}
-	if req.Mem <= 0 {
-		req.Mem = 512
-	}
 
 	// Verify user exists
-	userRec, ok := getUserByID(req.UserID)
-	if !ok {
+	if _, ok := getUserByID(req.UserID); !ok {
 		jsonError(w, "user not found", 404)
 		return
 	}
 
-	var cli *lxc.Client
-	var nodeID string
-	region := req.Region
-
-	if region != "" {
-		var err error
-		nodeID, cli, err = pickNode(region)
-		if err != nil {
-			jsonError(w, fmt.Sprintf("region %s: %v", region, err), 400)
-			return
-		}
-	} else {
-		var err error
-		nodeID, cli, err = getDefaultNodeClient()
-		if err != nil {
-			jsonError(w, "no nodes available", 400)
-			return
-		}
-		if nodeID != "" {
-			nodesMu.Lock()
-			if n, ok := nodes[nodeID]; ok {
-				region = n.Region
-			}
-			nodesMu.Unlock()
-		}
-	}
-	if cli == nil {
-		jsonError(w, "no nodes available", 400)
+	rec, ports, err := createContainerCore(req.UserID, req.UserData, req.CPU, req.Mem, req.Disk, req.ServicePort, req.Region, req.PlanID)
+	if err != nil {
+		jsonError(w, err.Error(), 400)
 		return
 	}
 
-	// Resolve plan if planId is provided
-	if req.PlanID != "" {
-		plansMu.Lock()
-		p, ok := plans[req.PlanID]
-		plansMu.Unlock()
-		if !ok {
-			jsonError(w, fmt.Sprintf("plan %s not found", req.PlanID), 400)
-			return
-		}
-		if req.CPU <= 0 {
-			req.CPU = p.VcpuCount
-		}
-		if req.Mem <= 0 {
-			req.Mem = p.RAM
-		}
-		if req.Disk <= 0 {
-			req.Disk = p.Disk
-		}
-	}
-	if req.CPU <= 0 {
-		req.CPU = 1
-	}
-	if req.Mem <= 0 {
-		req.Mem = 512
-	}
-
-	name := env("LXC_NAME_PREFIX", "user-") + generateUUID()
-	img := env("LXC_BASE_IMAGE", "clever-vpn-base")
-	net := env("LXC_NETWORK", "vpnbr0")
-
-	rec := &InstanceRecord{
-		Name:        name,
-		CPU:         req.CPU,
-		Mem:         req.Mem,
-		Disk:        req.Disk,
-		ServicePort: req.ServicePort,
-		UserID:      req.UserID,
-		Node:        nodeID,
-		Region:      region,
-		Health:      "healthy",
-	}
-
-	password := genPasswd()
-	rec.Password = password
-
-	if err := registerInstance(name, rec); err != nil {
-		jsonError(w, fmt.Sprintf("register: %v", err), 500)
-		return
-	}
-
-	ports := PortInfo{SSH: rec.SSHExtPort, Service: rec.ServiceExtPort}
-	log.Printf("[Admin] Creating %s for user %s (region=%s node=%s cpu=%d mem=%dMB disk=%dGB ip=%s)",
-		name, req.UserID, region, nodeID, req.CPU, req.Mem, req.Disk, rec.StaticIP)
-
-	userData := mergeUserData(req.UserData, name, bootstrapEnv(name, nodeID, req.CPU, req.Mem, req.Disk, ports), password)
-	if err := cli.CreateContainer(name, img, net, rec.StaticIP, req.CPU, req.Mem, req.Disk, map[string]string{"cloud-init.user-data": userData}); err != nil {
-		unregisterInstance(name)
-		jsonError(w, fmt.Sprintf("create: %v", err), 500)
-		return
-	}
-	if err := cli.StartContainer(name); err != nil {
-		unregisterInstance(name)
-		jsonError(w, fmt.Sprintf("start: %v", err), 500)
-		return
-	}
-
-	// Port forwarding uses known static IP — no need to wait
-	go func() {
-		if err := addPortForward(nodeID, ports.SSH, rec.StaticIP, 22); err != nil {
-			log.Printf("%s: forward ssh: %v", name, err)
-			return
-		}
-		if err := addPortForward(nodeID, ports.Service, rec.StaticIP, req.ServicePort); err != nil {
-			log.Printf("%s: forward svc: %v", name, err)
-			return
-		}
-		log.Printf("[Admin] Ports: ssh=%d, svc=%d -> %s", ports.SSH, ports.Service, rec.StaticIP)
-	}()
-
-	resp := CreateResp{
-		Status:   "creating",
-		Name:     name,
-		Password: password,
-		Ports:    ports,
-		CPU:      req.CPU,
-		Mem:      req.Mem,
-		Disk:     req.Disk,
-		NodeID:   nodeID,
-		Region:   region,
-		PublicIP: getNodePublicIP(nodeID),
+	resp := CreateResp{Status: "creating", Name: rec.Name, Ports: ports, CPU: rec.CPU, Mem: rec.Mem, Disk: rec.Disk, NodeID: rec.Node, Region: rec.Region, PublicIP: getNodePublicIP(rec.Node)}
+	if rec.Password != "" {
+		resp.Password = rec.Password
 	}
 	jsonOK(w, resp)
-
-	_ = userRec // user exists, verified above
 }
 
 // handleAdminListContainers lists all containers, optionally filtered by ?userID=xxx.
