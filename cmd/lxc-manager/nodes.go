@@ -420,13 +420,51 @@ func provisionNode(name, region, host string, port int, password string) (*NodeR
 // ==================== Remote Port Forwarding ====================
 
 // addRemotePortForward adds DNAT rules on a remote node via SSH.
+// Flushes any existing rules for the same port before adding new ones.
 func addRemotePortForward(nodeID string, extPort int, dstIP string, dstPort int) error {
+	// First, clean up old rules for this port (any target IP).
+	flushPortRules(nodeID, strconv.Itoa(extPort))
+	// Then add the new rules.
 	return nodeIPTables(nodeID, "-A", strconv.Itoa(extPort), dstIP, strconv.Itoa(dstPort))
 }
 
 // delRemotePortForward removes DNAT rules on a remote node via SSH.
 func delRemotePortForward(nodeID string, extPort int, dstIP string, dstPort int) {
 	nodeIPTables(nodeID, "-D", strconv.Itoa(extPort), dstIP, strconv.Itoa(dstPort))
+}
+
+// flushPortRules removes all DNAT rules for a given port on a remote node.
+func flushPortRules(nodeID, extPort string) {
+	nodesMu.Lock()
+	n, ok := nodes[nodeID]
+	nodesMu.Unlock()
+	if !ok {
+		return
+	}
+
+	client, err := sshConnect(n.SSHHost, n.SSHPort, n.SSHPassword)
+	if err != nil {
+		log.Printf("flush port %s on %s: ssh: %v", extPort, n.SSHHost, err)
+		return
+	}
+	defer client.Close()
+
+	for _, chain := range []string{"PREROUTING", "OUTPUT"} {
+		// List all DNAT rules for this port (any protocol) and delete them
+		listCmd := fmt.Sprintf("iptables -t nat -L %s -n --line-numbers 2>/dev/null | grep 'dpt:%s' | awk '{print $1}' | sort -rn",
+			chain, extPort)
+		out, err := sshExec(client, listCmd)
+		if err != nil || strings.TrimSpace(out) == "" {
+			continue
+		}
+		for _, lineNum := range strings.Split(strings.TrimSpace(out), "\n") {
+			if lineNum == "" {
+				continue
+			}
+			delCmd := fmt.Sprintf("iptables -t nat -D %s %s 2>/dev/null", chain, lineNum)
+			sshExec(client, delCmd)
+		}
+	}
 }
 
 // nodeIPTables runs iptables DNAT commands on a remote node via SSH.
@@ -447,17 +485,18 @@ func nodeIPTables(nodeID, action, extPort, dstIP, dstPort string) error {
 	target := fmt.Sprintf("%s:%s", dstIP, dstPort)
 	for _, proto := range []string{"tcp", "udp"} {
 		for _, chain := range []string{"PREROUTING", "OUTPUT"} {
-			cmd := fmt.Sprintf("iptables -t nat -C %s -p %s --dport %s -j DNAT --to %s 2>/dev/null",
+			// Check if exact rule already exists
+			checkCmd := fmt.Sprintf("iptables -t nat -C %s -p %s --dport %s -j DNAT --to %s 2>/dev/null",
 				chain, proto, extPort, target)
-			out, err := sshExec(client, cmd)
+			out, err := sshExec(client, checkCmd)
 			if err == nil {
-				// Rule exists, skip add for -A; for -D, proceed to delete
 				if action == "-A" {
-					continue
+					continue // already exists, skip
 				}
 			}
 			_ = out
 
+			// Add or delete the rule
 			addCmd := fmt.Sprintf("iptables -t nat %s %s -p %s --dport %s -j DNAT --to %s",
 				action, chain, proto, extPort, target)
 			out, err = sshExec(client, addCmd)
