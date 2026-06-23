@@ -3,11 +3,13 @@ package lxc
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
 	lxd "github.com/canonical/lxd/client"
 	"github.com/canonical/lxd/shared/api"
+	"github.com/gorilla/websocket"
 )
 
 type Client struct {
@@ -218,6 +220,31 @@ func (c *Client) ExecCheck(name string, timeout time.Duration) error {
 	}
 
 	return nil
+}
+
+// ExecInteractive runs a command inside a container with a PTY, bridging
+// stdin/stdout via the provided reader/writer. The control callback receives
+// the control WebSocket for window resize and signals.
+func (c *Client) ExecInteractive(name string, cmd []string, env map[string]string, stdin io.Reader, stdout io.Writer, control func(conn *websocket.Conn)) error {
+	req := api.InstanceExecPost{
+		Command:     cmd,
+		Interactive: true,
+		WaitForWS:   true,
+		Environment: env,
+	}
+
+	args := &lxd.InstanceExecArgs{
+		Stdin:   stdin,
+		Stdout:  stdout,
+		Stderr:  stdout,
+		Control: control,
+	}
+
+	op, err := c.server.ExecInstance(name, req, args)
+	if err != nil {
+		return fmt.Errorf("exec %s: %w", name, err)
+	}
+	return op.Wait()
 }
 
 func toContainer(inst *api.Instance, state *api.InstanceState) *Container {

@@ -46,6 +46,7 @@ type CreateResp struct {
 	Disk     int      `json:"disk"`
 	NodeID   string   `json:"nodeID"`
 	Region   string   `json:"region"`
+	PublicIP string   `json:"publicIP"`
 }
 
 type PortInfo struct {
@@ -511,11 +512,24 @@ func handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("Ports: ssh=%d, svc=%d -> %s", ports.SSH, ports.Service, vip)
 
-	resp := CreateResp{Status: "creating", Name: name, Ports: ports, CPU: req.CPU, Mem: req.Mem, Disk: req.Disk, NodeID: nodeID, Region: region}
+	resp := CreateResp{Status: "creating", Name: name, Ports: ports, CPU: req.CPU, Mem: req.Mem, Disk: req.Disk, NodeID: nodeID, Region: region, PublicIP: getNodePublicIP(nodeID)}
 	if password != "" {
 		resp.Password = password
 	}
 	jsonOK(w, resp)
+}
+
+// getNodePublicIP returns the SSH host (public IP) of the node, or empty if no node.
+func getNodePublicIP(nodeID string) string {
+	if nodeID == "" {
+		return ""
+	}
+	nodesMu.Lock()
+	defer nodesMu.Unlock()
+	if n, ok := nodes[nodeID]; ok {
+		return n.SSHHost
+	}
+	return ""
 }
 
 func clientForInstance(name string) *lxc.Client {
@@ -585,6 +599,7 @@ func handleList(w http.ResponseWriter, r *http.Request) {
 				}
 				entry["region"] = r.Region
 				entry["nodeID"] = r.Node
+				entry["publicIP"] = getNodePublicIP(r.Node)
 			}
 			instMu.Unlock()
 
@@ -632,6 +647,7 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 	}
 	resp["region"] = rec.Region
 	resp["nodeID"] = rec.Node
+	resp["publicIP"] = getNodePublicIP(rec.Node)
 	jsonOK(w, resp)
 }
 
@@ -1022,6 +1038,7 @@ func handleAdminCreateContainer(w http.ResponseWriter, r *http.Request) {
 		Disk:     req.Disk,
 		NodeID:   nodeID,
 		Region:   region,
+		PublicIP: getNodePublicIP(nodeID),
 	}
 	jsonOK(w, resp)
 
@@ -1054,6 +1071,7 @@ func handleAdminListContainers(w http.ResponseWriter, r *http.Request) {
 			"servicePort":  rec.ServicePort,
 			"region":       rec.Region,
 			"node":         rec.Node,
+			"publicIP":     getNodePublicIP(rec.Node),
 			"ports":        map[string]int{"ssh": rec.SSHExtPort, "service": rec.ServiceExtPort},
 			"created":      rec.Created.Format(time.RFC3339),
 			"terminalUrl":  fmt.Sprintf("https://%s/terminal/%s", cfg.Domain, name),
