@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -419,4 +420,54 @@ func provisionNode(name, region, host string, port int, password string) (*NodeR
 		Image:       img,
 	}
 	return rec, nil
+}
+
+// ==================== Remote Port Forwarding ====================
+
+// nodeIPTables runs an iptables command on a remote node via SSH.
+func nodeIPTables(nodeID string, args ...string) error {
+	nodesMu.Lock()
+	n, ok := nodes[nodeID]
+	nodesMu.Unlock()
+	if !ok {
+		return fmt.Errorf("node %s not found", nodeID)
+	}
+
+	client, err := sshConnect(n.SSHHost, n.SSHPort, n.SSHPassword)
+	if err != nil {
+		return fmt.Errorf("ssh to %s: %w", n.SSHHost, err)
+	}
+	defer client.Close()
+
+	cmd := "iptables -t nat " + strings.Join(args, " ")
+	out, err := sshExec(client, cmd)
+	if err != nil {
+		return fmt.Errorf("iptables %s: %w\n%s", n.SSHHost, err, out)
+	}
+	return nil
+}
+
+// addNodePortForward adds DNAT rules on a remote node.
+func addNodePortForward(nodeID string, extPort int, dstIP string, dstPort int) error {
+	target := fmt.Sprintf("%s:%d", dstIP, dstPort)
+	ext := strconv.Itoa(extPort)
+	for _, proto := range []string{"tcp", "udp"} {
+		for _, chain := range []string{"PREROUTING", "OUTPUT"} {
+			if err := nodeIPTables(nodeID, "-A", chain, "-p", proto, "--dport", ext, "-j", "DNAT", "--to", target); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// delNodePortForward removes DNAT rules on a remote node.
+func delNodePortForward(nodeID string, extPort int, dstIP string, dstPort int) {
+	target := fmt.Sprintf("%s:%d", dstIP, dstPort)
+	ext := strconv.Itoa(extPort)
+	for _, proto := range []string{"tcp", "udp"} {
+		for _, chain := range []string{"PREROUTING", "OUTPUT"} {
+			nodeIPTables(nodeID, "-D", chain, "-p", proto, "--dport", ext, "-j", "DNAT", "--to", target)
+		}
+	}
 }
