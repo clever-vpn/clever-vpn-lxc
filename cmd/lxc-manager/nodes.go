@@ -56,18 +56,43 @@ func loadNodes() {
 		if os.IsNotExist(err) { return }
 		log.Fatalf("read nodes: %v", err)
 	}
-	if err := json.Unmarshal(data, &nodes); err != nil {
-		log.Fatalf("parse nodes: %v", err)
+
+	// Try v1 format first, fall back to legacy map format
+	var wrapper struct {
+		Version int          `json:"version"`
+		Records []NodeRecord `json:"records"`
 	}
-	// Rebuild region index
-	for id, rec := range nodes {
-		regionNodes[rec.Region] = append(regionNodes[rec.Region], id)
+	if err := json.Unmarshal(data, &wrapper); err != nil || wrapper.Version == 0 {
+		legacy := map[string]*NodeRecord{}
+		if err := json.Unmarshal(data, &legacy); err != nil {
+			log.Fatalf("parse nodes: %v", err)
+		}
+		for id, rec := range legacy {
+			nodes[id] = rec
+			regionNodes[rec.Region] = append(regionNodes[rec.Region], id)
+		}
+		log.Printf("Loaded %d node(s) (legacy format, migrated)", len(nodes))
+		return
+	}
+
+	for i := range wrapper.Records {
+		rec := &wrapper.Records[i]
+		nodes[rec.ID] = rec
+		regionNodes[rec.Region] = append(regionNodes[rec.Region], rec.ID)
 	}
 	log.Printf("Loaded %d node(s)", len(nodes))
 }
 
 func saveNodes() {
-	data, _ := json.MarshalIndent(nodes, "", "  ")
+	var wrapper struct {
+		Version int          `json:"version"`
+		Records []NodeRecord `json:"records"`
+	}
+	wrapper.Version = 1
+	for _, rec := range nodes {
+		wrapper.Records = append(wrapper.Records, *rec)
+	}
+	data, _ := json.MarshalIndent(wrapper, "", "  ")
 	os.WriteFile(nodesFile, data, 0600)
 	triggerSync("nodes.json")
 }
