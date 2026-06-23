@@ -28,8 +28,11 @@ type NodeRecord struct {
 	SSHHost     string `json:"sshHost"`
 	SSHPort     int    `json:"sshPort"`
 	SSHPassword string `json:"sshPassword"`
-	Image       string `json:"image"`
-	PoolSize    string `json:"poolSize"` // btrfs pool size (e.g. "10", "15GiB")
+	Image         string `json:"image"`
+	PoolSize      string `json:"poolSize"`      // btrfs pool size (e.g. "10", "15GiB")
+	Status        string `json:"status"`         // "active" | "degraded" | "offline" | "rebuilding"
+	StatusReason  string `json:"statusReason,omitempty"`
+	MaxContainers int    `json:"maxContainers"`  // 0 = unlimited
 }
 
 var (
@@ -167,10 +170,19 @@ func pickNode(region string) (string, *lxc.Client, error) {
 	}
 	instMu.Unlock()
 
-	// Find node with fewest containers; tie-break by ID order
+	// Find best node: active, not at capacity, fewest containers
 	var bestID string
 	bestCount := -1
 	for _, id := range ids {
+		nodesMu.Lock()
+		n := nodes[id]
+		nodesMu.Unlock()
+		if n == nil || n.Status != "active" {
+			continue // skip inactive nodes
+		}
+		if n.MaxContainers > 0 && nodeCounts[id] >= n.MaxContainers {
+			continue // at capacity
+		}
 		cnt := nodeCounts[id]
 		if bestCount == -1 || cnt < bestCount {
 			bestCount = cnt
@@ -178,6 +190,10 @@ func pickNode(region string) (string, *lxc.Client, error) {
 		}
 	}
 	nodesMu.Unlock()
+
+	if bestID == "" {
+		return "", nil, fmt.Errorf("no active nodes available in region %s (all nodes are busy or offline)", region)
+	}
 
 	c, err := getNodeClient(bestID)
 	if err != nil {
@@ -200,6 +216,99 @@ func resolveNodeByNameOrID(input string) string {
 		}
 	}
 	return ""
+}
+
+// setNodeStatus updates a node's status and reason, then persists.
+func setNodeStatus(nodeID, status, reason string) {
+	nodesMu.Lock()
+	if n, ok := nodes[nodeID]; ok {
+		n.Status = status
+		n.StatusReason = reason
+	}
+	nodesMu.Unlock()
+	saveNodes()
+}
+
+// updateNodeConfig updates the mutable fields of a node (status, maxContainers).
+func updateNodeConfig(nodeID string, status *string, maxContainers *int) error {
+	nodesMu.Lock()
+	defer nodesMu.Unlock()
+
+	n, ok := nodes[nodeID]
+	if !ok {
+		return fmt.Errorf("node %s not found", nodeID)
+	}
+	if status != nil {
+		n.Status = *status
+	}
+	if maxContainers != nil {
+		n.MaxContainers = *maxContainers
+	}
+	saveNodes()
+	return nil
+}
+
+// rebuildNode reinitializes a node and recovers all its lost containers.
+func rebuildNode(nodeID string) error {
+	nodesMu.Lock()
+	n, ok := nodes[nodeID]
+	nodesMu.Unlock()
+	if !ok {
+		return fmt.Errorf("node %s not found", nodeID)
+	}
+
+	setNodeStatus(nodeID, "rebuilding", "administrator requested rebuild")
+
+	// SSH to the node and run the idempotent node-setup.sh
+	client, err := sshConnect(n.SSHHost, n.SSHPort, n.SSHPassword)
+	if err != nil {
+		setNodeStatus(nodeID, "degraded", fmt.Sprintf("ssh: %v", err))
+		return fmt.Errorf("ssh connect: %w", err)
+	}
+	defer client.Close()
+
+	// Wait for LXD
+	sshExec(client, "for i in $(seq 1 60); do lxc storage list &>/dev/null 2>&1 && break; sleep 2; done")
+
+	// Re-init LXD (idempotent)
+	setupCmd := fmt.Sprintf("STORAGE_POOL_SIZE=%s bash -c 'lxc profile device remove default root 2>/dev/null; lxc storage delete default 2>/dev/null; lxc network delete lxdbr0 2>/dev/null; rm -f /var/snap/lxd/common/lxd/disks/default.img; lxd init --auto --storage-backend=btrfs --storage-create-loop=%s'", n.PoolSize, n.PoolSize)
+	out, err := sshExec(client, setupCmd)
+	if err != nil {
+		setNodeStatus(nodeID, "degraded", fmt.Sprintf("lxd init: %v", err))
+		return fmt.Errorf("lxd init: %w\n%s", err, out)
+	}
+
+	// Upload and trust cert
+	clientCert := loadFile(env("LXD_CLIENT_CERT", "client.crt"))
+	if clientCert == "" {
+		setNodeStatus(nodeID, "degraded", "no client certificate")
+		return fmt.Errorf("no client certificate found")
+	}
+	if err := scpBytes(client, "/tmp/manager-client.crt", []byte(clientCert), "0644"); err != nil {
+		setNodeStatus(nodeID, "degraded", fmt.Sprintf("upload cert: %v", err))
+		return fmt.Errorf("upload cert: %w", err)
+	}
+	sshExec(client, "lxc config set core.https_address :8443 2>/dev/null || true")
+	sshExec(client, "lxc config trust add /tmp/manager-client.crt --type=client --restricted=false 2>/dev/null || true && rm -f /tmp/manager-client.crt")
+
+	// Mark all containers on this node as lost
+	instMu.Lock()
+	for _, rec := range instances {
+		if rec.Node == nodeID {
+			rec.Node = ""
+			rec.Health = healthLost
+			rec.HealthReason = "node rebuild"
+		}
+	}
+	instMu.Unlock()
+	saveInstances()
+
+	// Recover lost containers
+	go recoverOrphanContainersByPublicIP(nodeID, n.SSHHost)
+
+	setNodeStatus(nodeID, "active", "")
+	log.Printf("Node %s rebuild initiated, recovery in progress", n.Name)
+	return nil
 }
 
 // listNodesSlice returns all nodes as a slice (for API responses).
@@ -506,6 +615,7 @@ func provisionNode(name, region, host string, port int, password string, poolSiz
 		SSHPassword: password,
 		Image:       img,
 		PoolSize:    poolSize,
+		Status:      "active",
 	}
 	return rec, nil
 }

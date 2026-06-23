@@ -59,6 +59,8 @@ lxc-manager install --domain your-domain.com
 | `GET` | `/api/regions` | 无 | 可用区域列表 |
 | `POST` | `/api/nodes` | admin | 添加节点 |
 | `GET` | `/api/nodes` | admin | 列出节点 |
+| `PUT` | `/api/nodes/:id` | admin | 更新节点（状态/最大容器数） |
+| `POST` | `/api/nodes/:id/rebuild` | admin | 重建节点（重新初始化并恢复容器） |
 | `GET` | `/api/nodes/:id/containers` | admin | 节点上所有容器 |
 | `DELETE` | `/api/nodes/:id` | admin | 删除节点 |
 | `POST` | `/api/users` | admin | 创建用户（返回 userID + name + token） |
@@ -141,12 +143,13 @@ Authorization: Bearer cva_xxxxxxxx
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `name` | string | ✅ | 节点名称 |
-| `region` | string | ✅ | 区域 ID |
-| `sshHost` | string | ✅ | SSH 地址（同时作为公网 IP 标识） |
+| `nodeName` | string | ✅ | 节点名称 |
+| `region` | string | ✅ | 区域 |
+| `sshHost` | string | ✅ | SSH 地址（同为公网 IP） |
 | `sshPort` | int | ❌ | SSH 端口，默认 22 |
 | `sshPassword` | string | ✅ | root 密码 |
-| `poolSize` | string | ❌ | btrfs 存储池大小 (GiB)，默认 10 |
+| `poolSize` | string | ❌ | btrfs 池大小 (GiB)，默认 10 |
+| `maxContainers` | int | ❌ | 最大容器数，0 表示无限制 |
 
 ### 调整规格
 
@@ -268,7 +271,9 @@ POST /api/nodes
       "sshHost": "192.168.1.10",
       "sshPort": 22,
       "image": "clever-vpn-base",
-      "poolSize": "10"
+      "poolSize": "10",
+      "status": "active",
+      "maxContainers": 0
     }
   ]
 }

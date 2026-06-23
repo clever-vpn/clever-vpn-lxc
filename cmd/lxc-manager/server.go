@@ -512,10 +512,12 @@ func createContainerCore(userID string, userData string, cpu, mem, disk, service
 	cloudConfig := mergeUserData(userData, name, bootstrapEnv(name, nodeID, cpu, mem, disk, ports), password)
 	if err := cli.CreateContainer(name, img, net, rec.StaticIP, cpu, mem, disk, map[string]string{"cloud-init.user-data": cloudConfig}); err != nil {
 		unregisterInstance(name)
+		setNodeStatus(nodeID, "degraded", fmt.Sprintf("create failed: %v", err))
 		return nil, PortInfo{}, fmt.Errorf("create: %v", err)
 	}
 	if err := cli.StartContainer(name); err != nil {
 		unregisterInstance(name)
+		setNodeStatus(nodeID, "degraded", fmt.Sprintf("start failed: %v", err))
 		return nil, PortInfo{}, fmt.Errorf("start: %v", err)
 	}
 
@@ -1154,12 +1156,13 @@ func handleAdminResizeContainer(w http.ResponseWriter, r *http.Request) {
 
 func handleNodeAdd(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name        string `json:"name"`
-		Region      string `json:"region"`
-		SSHHost     string `json:"sshHost"`
-		SSHPort     int    `json:"sshPort"`
-		SSHPassword string `json:"sshPassword"`
-		PoolSize    string `json:"poolSize"`
+		Name          string `json:"name"`
+		Region        string `json:"region"`
+		SSHHost       string `json:"sshHost"`
+		SSHPort       int    `json:"sshPort"`
+		SSHPassword   string `json:"sshPassword"`
+		PoolSize      string `json:"poolSize"`
+		MaxContainers int    `json:"maxContainers"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "invalid body", 400)
@@ -1177,6 +1180,9 @@ func handleNodeAdd(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		jsonError(w, fmt.Sprintf("provision: %v", err), 500)
 		return
+	}
+	if req.MaxContainers > 0 {
+		rec.MaxContainers = req.MaxContainers
 	}
 
 	if err := addNode(rec); err != nil {
@@ -1239,6 +1245,45 @@ func handleNodeContainers(w http.ResponseWriter, r *http.Request) {
 	}
 	instMu.Unlock()
 	jsonOK(w, result)
+}
+
+// handleNodeUpdate updates node configuration (status, maxContainers).
+func handleNodeUpdate(w http.ResponseWriter, r *http.Request) {
+	nodeID := stripPrefix(r.URL.Path, "/api/nodes/")
+	if nodeID == "" {
+		jsonError(w, "node id required", 400)
+		return
+	}
+
+	var req struct {
+		Status        *string `json:"status"`
+		MaxContainers *int    `json:"maxContainers"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid body", 400)
+		return
+	}
+
+	if err := updateNodeConfig(nodeID, req.Status, req.MaxContainers); err != nil {
+		jsonError(w, err.Error(), 404)
+		return
+	}
+	jsonOK(w, map[string]string{"status": "updated", "nodeID": nodeID})
+}
+
+// handleNodeRebuild rebuilds a node: reinitializes LXD and recovers all containers.
+func handleNodeRebuild(w http.ResponseWriter, r *http.Request) {
+	nodeID := stripPrefix(strings.TrimSuffix(r.URL.Path, "/rebuild"), "/api/nodes/")
+	if nodeID == "" {
+		jsonError(w, "node id required", 400)
+		return
+	}
+
+	if err := rebuildNode(nodeID); err != nil {
+		jsonError(w, err.Error(), 500)
+		return
+	}
+	jsonOK(w, map[string]string{"status": "rebuilding", "nodeID": nodeID})
 }
 
 // ==================== User Handlers ====================
@@ -1525,6 +1570,18 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		handleNodeDelete(w, r)
+	case strings.HasPrefix(p, "/api/nodes/") && strings.HasSuffix(p, "/rebuild") && r.Method == "POST":
+		if !validateAdmin(r) {
+			jsonError(w, "unauthorized", 401)
+			return
+		}
+		handleNodeRebuild(w, r)
+	case strings.HasPrefix(p, "/api/nodes/") && !strings.Contains(p, "/containers") && r.Method == "PUT":
+		if !validateAdmin(r) {
+			jsonError(w, "unauthorized", 401)
+			return
+		}
+		handleNodeUpdate(w, r)
 	// Users (admin auth)
 	case p == "/api/users" && r.Method == "POST":
 		if !validateAdmin(r) {
