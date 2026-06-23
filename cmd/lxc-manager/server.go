@@ -74,6 +74,7 @@ type APIError struct {
 // ==================== Instance Registry ====================
 
 type InstanceRecord struct {
+	Name           string    `json:"id"`
 	CPU            int       `json:"cpu"`
 	Mem            int       `json:"mem"`
 	Disk           int       `json:"disk"`
@@ -81,9 +82,8 @@ type InstanceRecord struct {
 	SSHExtPort     int       `json:"sshExtPort"`
 	ServiceExtPort int       `json:"serviceExtPort"`
 	UserID         string    `json:"userID"`
-	Token          string    `json:"token"`
 	Password       string    `json:"password,omitempty"`
-	Node           string    `json:"node"`
+	Node           string    `json:"nodeID"`
 	Created        time.Time `json:"created"`
 	Health         string    `json:"health"`
 	HealthReason   string    `json:"healthReason,omitempty"`
@@ -113,10 +113,36 @@ func loadInstances() {
 		}
 		log.Fatalf("read instances: %v", err)
 	}
-	if err := json.Unmarshal(data, &instances); err != nil {
-		log.Fatalf("parse instances: %v", err)
+
+	// Try v1 format first (array with version wrapper), fall back to legacy map format
+	var wrapper struct {
+		Version int              `json:"version"`
+		Records []InstanceRecord `json:"records"`
 	}
-	for _, r := range instances {
+	if err := json.Unmarshal(data, &wrapper); err != nil || wrapper.Version == 0 {
+		// Legacy format: map[string]*InstanceRecord
+		legacy := map[string]*InstanceRecord{}
+		if err := json.Unmarshal(data, &legacy); err != nil {
+			log.Fatalf("parse instances: %v", err)
+		}
+		for name, r := range legacy {
+			r.Name = name
+			if r.Health == "" {
+				r.Health = "healthy"
+			}
+			instances[name] = r
+			usedSSH[r.SSHExtPort] = true
+			usedSvc[r.ServiceExtPort] = true
+		}
+		log.Printf("Loaded %d instance(s) (legacy format, migrated)", len(instances))
+		return
+	}
+	for i := range wrapper.Records {
+		r := &wrapper.Records[i]
+		if r.Health == "" {
+			r.Health = "healthy"
+		}
+		instances[r.Name] = r
 		usedSSH[r.SSHExtPort] = true
 		usedSvc[r.ServiceExtPort] = true
 	}
@@ -124,7 +150,15 @@ func loadInstances() {
 }
 
 func saveInstances() {
-	data, _ := json.MarshalIndent(instances, "", "  ")
+	var wrapper struct {
+		Version int              `json:"version"`
+		Records []InstanceRecord `json:"records"`
+	}
+	wrapper.Version = 1
+	for _, r := range instances {
+		wrapper.Records = append(wrapper.Records, *r)
+	}
+	data, _ := json.MarshalIndent(wrapper, "", "  ")
 	os.WriteFile(instFile, data, 0600)
 	triggerSync("instances.json")
 }
@@ -390,12 +424,12 @@ func handleCreate(w http.ResponseWriter, r *http.Request) {
 	net := env("LXC_NETWORK", "vpnbr0")
 
 	rec := &InstanceRecord{
+		Name:        name,
 		CPU:         req.CPU,
 		Mem:         req.Mem,
 		Disk:        req.Disk,
 		ServicePort: req.ServicePort,
 		UserID:      userID,
-		Token:       getBearerToken(r),
 		Node:        nodeID,
 		Health:      "healthy",
 	}
@@ -798,12 +832,12 @@ func handleAdminCreateContainer(w http.ResponseWriter, r *http.Request) {
 	net := env("LXC_NETWORK", "vpnbr0")
 
 	rec := &InstanceRecord{
+		Name:        name,
 		CPU:         req.CPU,
 		Mem:         req.Mem,
 		Disk:        req.Disk,
 		ServicePort: req.ServicePort,
 		UserID:      req.UserID,
-		Token:       getBearerToken(r),
 		Node:        nodeID,
 		Health:      "healthy",
 	}

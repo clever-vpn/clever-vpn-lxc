@@ -57,24 +57,53 @@ func loadUsers() {
 		}
 		log.Fatalf("read users: %v", err)
 	}
-	json.Unmarshal(data, &users)
 
-	// Rebuild runtime token→id index
+	// Try v1 format first, fall back to legacy map format
+	var wrapper struct {
+		Version int          `json:"version"`
+		Records []UserRecord `json:"records"`
+	}
 	userTokensMu.Lock()
-	for id, rec := range users {
+	defer userTokensMu.Unlock()
+
+	if err := json.Unmarshal(data, &wrapper); err != nil || wrapper.Version == 0 {
+		legacy := map[string]*UserRecord{}
+		if err := json.Unmarshal(data, &legacy); err != nil {
+			log.Fatalf("parse users: %v", err)
+		}
+		for id, rec := range legacy {
+			users[id] = rec
+			for _, tok := range rec.Tokens {
+				userTokens[tok] = id
+			}
+		}
+		log.Printf("Loaded %d user(s), %d token(s) (legacy format, migrated)", len(users), len(userTokens))
+		return
+	}
+
+	for i := range wrapper.Records {
+		rec := &wrapper.Records[i]
+		users[rec.ID] = rec
 		for _, tok := range rec.Tokens {
-			userTokens[tok] = id
+			userTokens[tok] = rec.ID
 		}
 	}
-	userTokensMu.Unlock()
-
 	log.Printf("Loaded %d user(s), %d token(s)", len(users), len(userTokens))
 }
 
 // saveUsers persists user records (including tokens) to users.json.
 func saveUsers() {
 	defer triggerSync("users.json")
-	data, _ := json.MarshalIndent(users, "", "  ")
+
+	var wrapper struct {
+		Version int          `json:"version"`
+		Records []UserRecord `json:"records"`
+	}
+	wrapper.Version = 1
+	for _, rec := range users {
+		wrapper.Records = append(wrapper.Records, *rec)
+	}
+	data, _ := json.MarshalIndent(wrapper, "", "  ")
 	os.WriteFile(usersFile, data, 0600)
 }
 
