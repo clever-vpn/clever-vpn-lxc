@@ -1862,7 +1862,7 @@ MaxRetentionSec=3day
 			"  - path: /etc/systemd/journald.conf.d/50-limit.conf\n    permissions: '0644'\n    owner: root:root\n    content: |\n%s"+
 			"\nruncmd:\n"+
 			"  - sed -i '/^export PS1=/d' /etc/bash.bashrc\n"+
-			"  - |\n      echo 'export PS1=\"\\[\\e[1;32m\\]root@clever-vpn\\[\\e[0m\\]:\\w\\$ \"' >> /etc/bash.bashrc",
+			"  - |\n      echo 'export PS1=\"\\[\\e[1;32m\\]root@clever-vpn\\[\\e[0m\\]:\\w# \"' >> /etc/bash.bashrc",
 		hostname, indent(bootstrapContent, "      "), indent(journaldConf, "      "))
 }
 

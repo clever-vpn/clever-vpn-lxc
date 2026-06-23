@@ -214,6 +214,7 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
   "mem": 512,
   "disk": 10,
   "nodeID": "nd_abc123",
+  "publicIP": "203.0.113.5",
   "ports": { "ssh": 22001, "service": 50001 }
 }
 ```
@@ -224,7 +225,7 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 
 **请求头**：`Authorization: Bearer <user-token>`
 
-**响应** `200`：容器列表，包含 `terminalUrl` 和 `health` 字段。
+**响应** `200`：容器列表，包含 `terminalUrl`、`health`、`region`、`nodeID` 和 `publicIP` 字段。
 
 ### `GET /api/containers/{name}` — 获取容器详情
 
@@ -239,6 +240,9 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
   "status": "Running",
   "terminalUrl": "https://lxc-api.clever-clouds.com/terminal/user-a1b2c3d4",
   "health": "healthy",
+  "region": "nrt",
+  "nodeID": "nd_abc123",
+  "publicIP": "203.0.113.5",
   "...": "..."
 }
 ```
