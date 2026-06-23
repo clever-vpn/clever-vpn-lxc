@@ -306,7 +306,94 @@ func cleanupOrphanContainers(nodeID string) {
 	}
 }
 
-// ==================== SSH Provisioning ====================
+// recoverOrphanContainersByPublicIP finds lost containers (Node="", health="lost")
+// whose NodePublicIP matches the new node's SSHHost, and re-creates them.
+func recoverOrphanContainersByPublicIP(nodeID string, sshHost string) {
+	cli, err := getNodeClient(nodeID)
+	if err != nil {
+		log.Printf("Recovery: cannot connect to node %s: %v", nodeID, err)
+		return
+	}
+
+	instMu.Lock()
+	var toRecover []*InstanceRecord
+	for _, rec := range instances {
+		if rec.Node == "" && rec.Health == "lost" && rec.NodePublicIP == sshHost && rec.NodePublicIP != "" {
+			toRecover = append(toRecover, rec)
+			// Pre-claim the ports and IP to avoid conflicts during recovery
+			usedSSH[rec.SSHExtPort] = true
+			usedSvc[rec.ServiceExtPort] = true
+			if usedIPs[nodeID] == nil {
+				usedIPs[nodeID] = map[int]bool{}
+			}
+			suffix := parseIPLastOctet(rec.StaticIP)
+			if suffix > 0 {
+				usedIPs[nodeID][suffix] = true
+			}
+		}
+	}
+	instMu.Unlock()
+
+	if len(toRecover) == 0 {
+		return
+	}
+
+	log.Printf("Recovery: found %d lost container(s) for node %s (ip=%s)", len(toRecover), nodeID, sshHost)
+
+	img := env("LXC_BASE_IMAGE", "clever-vpn-base")
+	net := env("LXC_NETWORK", "vpnbr0")
+
+	for _, rec := range toRecover {
+		log.Printf("Recovery: rebuilding %s (cpu=%d mem=%dMB disk=%dGB ssh=%d svc=%d ip=%s)",
+			rec.Name, rec.CPU, rec.Mem, rec.Disk, rec.SSHExtPort, rec.ServiceExtPort, rec.StaticIP)
+
+		// Re-register with new node
+		rec.Node = nodeID
+		rec.Health = "creating"
+		saveInstances()
+
+		cloudConfig := mergeUserData(rec.UserData, rec.Name, bootstrapEnv(rec.Name, nodeID, rec.CPU, rec.Mem, rec.Disk,
+			PortInfo{SSH: rec.SSHExtPort, Service: rec.ServiceExtPort}), rec.Password)
+		if err := cli.CreateContainer(rec.Name, img, net, rec.StaticIP, rec.CPU, rec.Mem, rec.Disk,
+			map[string]string{"cloud-init.user-data": cloudConfig}); err != nil {
+			log.Printf("Recovery: failed to create %s: %v", rec.Name, err)
+			continue
+		}
+		if err := cli.StartContainer(rec.Name); err != nil {
+			log.Printf("Recovery: failed to start %s: %v", rec.Name, err)
+			continue
+		}
+
+		// Restore port forwarding
+		go func(r *InstanceRecord) {
+			if err := addPortForward(nodeID, r.SSHExtPort, r.StaticIP, 22); err != nil {
+				log.Printf("Recovery %s: forward ssh: %v", r.Name, err)
+				return
+			}
+			if err := addPortForward(nodeID, r.ServiceExtPort, r.StaticIP, r.ServicePort); err != nil {
+				log.Printf("Recovery %s: forward svc: %v", r.Name, err)
+				return
+			}
+			r.Health = "healthy"
+			saveInstances()
+			log.Printf("Recovery: %s restored (ssh:%d→%s:22 svc:%d→%s:%d)",
+				r.Name, r.SSHExtPort, r.StaticIP, r.ServiceExtPort, r.StaticIP, r.ServicePort)
+		}(rec)
+	}
+}
+
+// parseIPLastOctet extracts the last octet from an IP like "10.0.1.100".
+func parseIPLastOctet(ip string) int {
+	parts := strings.Split(ip, ".")
+	if len(parts) != 4 {
+		return 0
+	}
+	n, err := strconv.Atoi(parts[3])
+	if err != nil {
+		return 0
+	}
+	return n
+}
 
 func sshConnect(host string, port int, password string) (*ssh.Client, error) {
 	config := &ssh.ClientConfig{
