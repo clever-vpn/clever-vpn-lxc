@@ -127,6 +127,10 @@ func TestRegions(t *testing.T) {
 	}
 	defer func() { nodes = nil; regionNodes = nil }()
 
+	// Seed regions via data file (regions are now managed in regions.json)
+	regions["tokyo"] = &RegionRecord{ID: "tokyo", City: "Tokyo", Country: "JP", Continent: "Asia"}
+	regions["ewr"] = &RegionRecord{ID: "ewr", City: "Newark", Country: "US", Continent: "North America"}
+
 	req := httptest.NewRequest("GET", "/api/regions", nil)
 	w := httptest.NewRecorder()
 

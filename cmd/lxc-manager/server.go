@@ -84,6 +84,7 @@ type InstanceRecord struct {
 	UserID         string    `json:"userID"`
 	Password       string    `json:"password,omitempty"`
 	Node           string    `json:"nodeID"`
+	Region         string    `json:"region"`
 	Created        time.Time `json:"created"`
 	Health         string    `json:"health"`
 	HealthReason   string    `json:"healthReason,omitempty"`
@@ -415,6 +416,7 @@ func handleCreate(w http.ResponseWriter, r *http.Request) {
 		ServicePort: req.ServicePort,
 		UserID:      userID,
 		Node:        nodeID,
+		Region:      req.Region,
 		Health:      "healthy",
 	}
 
@@ -708,7 +710,66 @@ func handleRestart(w http.ResponseWriter, r *http.Request) {
 }
 
 func handlePlans(w http.ResponseWriter, r *http.Request) {
-	jsonOK(w, plans)
+	if r.Method == "GET" {
+		region := r.URL.Query().Get("region")
+		jsonOK(w, listPlansSlice(region))
+		return
+	}
+
+	// POST / PUT / DELETE — admin only
+	if !validateAdmin(r) {
+		jsonError(w, "unauthorized", 401)
+		return
+	}
+
+	switch r.Method {
+	case "POST":
+		var rec PlanRecord
+		if err := json.NewDecoder(r.Body).Decode(&rec); err != nil || rec.ID == "" {
+			jsonError(w, "id, name required", 400)
+			return
+		}
+		if err := addPlan(&rec); err != nil {
+			jsonError(w, err.Error(), 409)
+			return
+		}
+		log.Printf("Plan %s created", rec.ID)
+		jsonOK(w, rec)
+
+	case "DELETE":
+		id := stripPrefix(r.URL.Path, "/api/plans/")
+		if id == "" {
+			jsonError(w, "plan id required", 400)
+			return
+		}
+		if err := deletePlan(id); err != nil {
+			jsonError(w, err.Error(), 404)
+			return
+		}
+		log.Printf("Plan %s deleted", id)
+		jsonOK(w, map[string]string{"status": "deleted", "id": id})
+
+	case "PUT":
+		id := stripPrefix(r.URL.Path, "/api/plans/")
+		if id == "" {
+			jsonError(w, "plan id required", 400)
+			return
+		}
+		var rec PlanRecord
+		if err := json.NewDecoder(r.Body).Decode(&rec); err != nil {
+			jsonError(w, "invalid body", 400)
+			return
+		}
+		if err := updatePlan(id, &rec); err != nil {
+			jsonError(w, err.Error(), 404)
+			return
+		}
+		log.Printf("Plan %s updated", id)
+		jsonOK(w, rec)
+
+	default:
+		jsonError(w, "method not allowed", 405)
+	}
 }
 
 func handleResize(w http.ResponseWriter, r *http.Request) {
@@ -823,6 +884,7 @@ func handleAdminCreateContainer(w http.ResponseWriter, r *http.Request) {
 		ServicePort: req.ServicePort,
 		UserID:      req.UserID,
 		Node:        nodeID,
+		Region:      req.Region,
 		Health:      "healthy",
 	}
 
@@ -1293,31 +1355,65 @@ func handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleRegions(w http.ResponseWriter, r *http.Request) {
-	nodesMu.Lock()
-	seen := map[string]bool{}
-	for _, rec := range nodes {
-		if rec.Region != "" {
-			seen[rec.Region] = true
-		}
+	if r.Method == "GET" {
+		jsonOK(w, listRegionsSlice())
+		return
 	}
-	nodesMu.Unlock()
 
-	var regions []RegionInfo
-	for id := range seen {
-		meta, ok := regionMeta[id]
-		if !ok {
-			meta = struct {
-				City    string `json:"city"`
-				Country string `json:"country"`
-			}{City: id, Country: "XX"}
-		}
-		regions = append(regions, RegionInfo{
-			ID:      id,
-			City:    meta.City,
-			Country: meta.Country,
-		})
+	// POST / PUT / DELETE — admin only
+	if !validateAdmin(r) {
+		jsonError(w, "unauthorized", 401)
+		return
 	}
-	jsonOK(w, regions)
+
+	switch r.Method {
+	case "POST":
+		var rec RegionRecord
+		if err := json.NewDecoder(r.Body).Decode(&rec); err != nil || rec.ID == "" {
+			jsonError(w, "id, city, country required", 400)
+			return
+		}
+		if err := addRegion(&rec); err != nil {
+			jsonError(w, err.Error(), 409)
+			return
+		}
+		log.Printf("Region %s created", rec.ID)
+		jsonOK(w, rec)
+
+	case "DELETE":
+		id := stripPrefix(r.URL.Path, "/api/regions/")
+		if id == "" {
+			jsonError(w, "region id required", 400)
+			return
+		}
+		if err := deleteRegion(id); err != nil {
+			jsonError(w, err.Error(), 404)
+			return
+		}
+		log.Printf("Region %s deleted", id)
+		jsonOK(w, map[string]string{"status": "deleted", "id": id})
+
+	case "PUT":
+		id := stripPrefix(r.URL.Path, "/api/regions/")
+		if id == "" {
+			jsonError(w, "region id required", 400)
+			return
+		}
+		var rec RegionRecord
+		if err := json.NewDecoder(r.Body).Decode(&rec); err != nil {
+			jsonError(w, "invalid body", 400)
+			return
+		}
+		if err := updateRegion(id, &rec); err != nil {
+			jsonError(w, err.Error(), 404)
+			return
+		}
+		log.Printf("Region %s updated", id)
+		jsonOK(w, rec)
+
+	default:
+		jsonError(w, "method not allowed", 405)
+	}
 }
 
 // corsHandler adds CORS headers for all origins.
@@ -1349,7 +1445,31 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		handleAdminLogin(w, r)
 	case p == "/api/regions" && r.Method == "GET":
 		handleRegions(w, r)
+	case p == "/api/regions" && (r.Method == "POST"):
+		if !validateAdmin(r) {
+			jsonError(w, "unauthorized", 401)
+			return
+		}
+		handleRegions(w, r)
+	case strings.HasPrefix(p, "/api/regions/") && (r.Method == "PUT" || r.Method == "DELETE"):
+		if !validateAdmin(r) {
+			jsonError(w, "unauthorized", 401)
+			return
+		}
+		handleRegions(w, r)
 	case p == "/api/plans" && r.Method == "GET":
+		handlePlans(w, r)
+	case p == "/api/plans" && (r.Method == "POST"):
+		if !validateAdmin(r) {
+			jsonError(w, "unauthorized", 401)
+			return
+		}
+		handlePlans(w, r)
+	case strings.HasPrefix(p, "/api/plans/") && (r.Method == "PUT" || r.Method == "DELETE"):
+		if !validateAdmin(r) {
+			jsonError(w, "unauthorized", 401)
+			return
+		}
 		handlePlans(w, r)
 	case p == "/api/health" && r.Method == "GET":
 		jsonOK(w, map[string]string{"status": "ok"})
@@ -1494,6 +1614,8 @@ func cmdServe() {
 	loadAdminTokens()
 	loadInstances()
 	loadNodes()
+	loadRegions()
+	loadPlans()
 
 	var err error
 	lxdClient, err = getDefaultClient()

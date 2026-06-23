@@ -31,9 +31,9 @@ type NodeRecord struct {
 }
 
 var (
-	nodesFile   string
-	nodesMu     sync.Mutex
-	nodes       = map[string]*NodeRecord{} // id → record
+	nodesFile string
+	nodesMu   sync.Mutex
+	nodes     = map[string]*NodeRecord{} // id → record
 
 	// Runtime index: region → ordered node IDs.
 	regionNodes = map[string][]string{}
@@ -53,7 +53,9 @@ func loadNodes() {
 	nodesFile = filepath.Join(ensureDataDir(), "nodes.json")
 	data, err := os.ReadFile(nodesFile)
 	if err != nil {
-		if os.IsNotExist(err) { return }
+		if os.IsNotExist(err) {
+			return
+		}
 		log.Fatalf("read nodes: %v", err)
 	}
 
@@ -254,7 +256,9 @@ func getDefaultClient() (*lxc.Client, error) {
 			clientCert := loadFile(env("LXD_CLIENT_CERT", "client.crt"))
 			clientKey := loadFile(env("LXD_CLIENT_KEY", "client.key"))
 			c, err := lxc.NewClient(env("LXD_URL", "https://127.0.0.1:8443"), clientCert, clientKey)
-			if err != nil { return nil, err }
+			if err != nil {
+				return nil, err
+			}
 			localClient = c
 		}
 		return localClient, nil
