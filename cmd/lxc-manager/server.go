@@ -33,6 +33,7 @@ type CreateReq struct {
 	ServicePort int    `json:"servicePort"`
 	UserData    string `json:"userData"`
 	Region      string `json:"region"`
+	PlanID      string `json:"planId"`
 }
 
 type CreateResp struct {
@@ -65,6 +66,7 @@ type AdminCreateContainerReq struct {
 	ServicePort int    `json:"servicePort"`
 	UserData    string `json:"userData"`
 	Region      string `json:"region"`
+	PlanID      string `json:"planId"`
 }
 
 type APIError struct {
@@ -393,15 +395,49 @@ func handleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		var err error
-		cli, err = getDefaultClient()
+		nodeID, cli, err = getDefaultNodeClient()
 		if err != nil {
 			jsonError(w, "no nodes available, add a node first: lxc-manager add-node", 400)
 			return
+		}
+		// Infer region from the selected node
+		if nodeID != "" {
+			nodesMu.Lock()
+			if n, ok := nodes[nodeID]; ok {
+				region = n.Region
+			}
+			nodesMu.Unlock()
 		}
 	}
 	if cli == nil {
 		jsonError(w, "no nodes available, add a node first: lxc-manager add-node", 400)
 		return
+	}
+
+	// Resolve plan if planId is provided
+	if req.PlanID != "" {
+		plansMu.Lock()
+		p, ok := plans[req.PlanID]
+		plansMu.Unlock()
+		if !ok {
+			jsonError(w, fmt.Sprintf("plan %s not found", req.PlanID), 400)
+			return
+		}
+		if req.CPU <= 0 {
+			req.CPU = p.VcpuCount
+		}
+		if req.Mem <= 0 {
+			req.Mem = p.RAM
+		}
+		if req.Disk <= 0 {
+			req.Disk = p.Disk
+		}
+	}
+	if req.CPU <= 0 {
+		req.CPU = 1
+	}
+	if req.Mem <= 0 {
+		req.Mem = 512
 	}
 
 	name := env("LXC_NAME_PREFIX", "user-") + generateUUID()
@@ -416,7 +452,7 @@ func handleCreate(w http.ResponseWriter, r *http.Request) {
 		ServicePort: req.ServicePort,
 		UserID:      userID,
 		Node:        nodeID,
-		Region:      req.Region,
+		Region:      region,
 		Health:      "healthy",
 	}
 
@@ -861,15 +897,48 @@ func handleAdminCreateContainer(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		var err error
-		cli, err = getDefaultClient()
+		nodeID, cli, err = getDefaultNodeClient()
 		if err != nil {
 			jsonError(w, "no nodes available", 400)
 			return
+		}
+		if nodeID != "" {
+			nodesMu.Lock()
+			if n, ok := nodes[nodeID]; ok {
+				region = n.Region
+			}
+			nodesMu.Unlock()
 		}
 	}
 	if cli == nil {
 		jsonError(w, "no nodes available", 400)
 		return
+	}
+
+	// Resolve plan if planId is provided
+	if req.PlanID != "" {
+		plansMu.Lock()
+		p, ok := plans[req.PlanID]
+		plansMu.Unlock()
+		if !ok {
+			jsonError(w, fmt.Sprintf("plan %s not found", req.PlanID), 400)
+			return
+		}
+		if req.CPU <= 0 {
+			req.CPU = p.VcpuCount
+		}
+		if req.Mem <= 0 {
+			req.Mem = p.RAM
+		}
+		if req.Disk <= 0 {
+			req.Disk = p.Disk
+		}
+	}
+	if req.CPU <= 0 {
+		req.CPU = 1
+	}
+	if req.Mem <= 0 {
+		req.Mem = 512
 	}
 
 	name := env("LXC_NAME_PREFIX", "user-") + generateUUID()
