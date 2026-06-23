@@ -29,6 +29,7 @@ type NodeRecord struct {
 	SSHPort     int    `json:"sshPort"`
 	SSHPassword string `json:"sshPassword"`
 	Image       string `json:"image"`
+	PoolSize    string `json:"poolSize"` // btrfs pool size (e.g. "10", "15GiB")
 }
 
 var (
@@ -345,8 +346,14 @@ func scpBytes(client *ssh.Client, remotePath string, data []byte, mode string) e
 	return nil
 }
 
-func provisionNode(name, region, host string, port int, password string) (*NodeRecord, error) {
-	log.Printf("Provisioning node %s (%s:%d region=%s)...", name, host, port, region)
+func provisionNode(name, region, host string, port int, password string, poolSize string) (*NodeRecord, error) {
+	if poolSize == "" {
+		poolSize = cfg.StoragePoolSize
+	}
+	if poolSize == "" {
+		poolSize = "15"
+	}
+	log.Printf("Provisioning node %s (%s:%d region=%s pool=%sGiB)...", name, host, port, region, poolSize)
 
 	client, err := sshConnect(host, port, password)
 	if err != nil {
@@ -361,11 +368,16 @@ func provisionNode(name, region, host string, port int, password string) (*NodeR
 	}
 	log.Printf("  lxd: %s", strings.TrimSpace(out))
 
-	// 2. Initialize LXD if needed
-	out, err = sshExec(client, "lxc network show lxdbr0 &>/dev/null || lxd init --auto")
+	// Wait for LXD daemon to be fully ready (first install takes time)
+	sshExec(client, "for i in $(seq 1 60); do lxc storage list &>/dev/null && break; sleep 2; done")
+
+	// 2. Initialize LXD with btrfs storage pool
+	poolCmd := fmt.Sprintf("lxd init --auto --storage-backend=btrfs --storage-create-loop=%s", poolSize)
+	out, err = sshExec(client, poolCmd)
 	if err != nil {
-		return nil, fmt.Errorf("init lxd: %w\n%s", err, out)
+		return nil, fmt.Errorf("init lxd (btrfs %sGiB): %w\n%s", poolSize, err, out)
 	}
+	log.Printf("  lxd init: btrfs %sGiB", poolSize)
 
 	// 3. Enable HTTPS API
 	out, err = sshExec(client, "lxc config set core.https_address :8443 2>/dev/null || true")
@@ -413,6 +425,7 @@ func provisionNode(name, region, host string, port int, password string) (*NodeR
 		SSHPort:     port,
 		SSHPassword: password,
 		Image:       img,
+		PoolSize:    poolSize,
 	}
 	return rec, nil
 }

@@ -71,9 +71,10 @@ init_lxd() {
         return 0
     fi
 
-    log_info "Initializing LXD with defaults..."
-    lxd init --auto
-    log_info "LXD initialized"
+    local pool_size="${STORAGE_POOL_SIZE:-15}"
+    log_info "Initializing LXD with btrfs (${pool_size}GiB loop)..."
+    lxd init --auto --storage-backend=btrfs --storage-create-loop="${pool_size}"
+    log_info "LXD initialized with btrfs ${pool_size}GiB"
 }
 
 # ==================== 默认配置 ====================

@@ -21,6 +21,7 @@ type Config struct {
 	LXDBaseImage       string       `json:"lxd_base_image"`
 	LXDNetwork         string       `json:"lxd_network"`
 	LXCNamePrefix      string       `json:"lxc_name_prefix"`
+	StoragePoolSize    string       `json:"storage_pool_size"` // btrfs pool size (e.g. "10", "15GiB")
 	Backup             BackupConfig `json:"backup"`
 }
 
@@ -41,10 +42,11 @@ func defaultConfig() Config {
 		Port:          "8080",
 		LXDClientCert: "client.crt",
 		LXDClientKey:  "client.key",
-		LXDURL:        "https://127.0.0.1:8443",
-		LXDBaseImage:  "clever-vpn-base",
-		LXDNetwork:    "vpnbr0",
-		LXCNamePrefix: "user-",
+		LXDURL:          "https://127.0.0.1:8443",
+		LXDBaseImage:    "clever-vpn-base",
+		LXDNetwork:      "vpnbr0",
+		LXCNamePrefix:   "user-",
+		StoragePoolSize: "15",
 		Backup: BackupConfig{
 			Interval: "1h",
 		},
