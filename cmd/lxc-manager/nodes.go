@@ -99,6 +99,21 @@ func removeNode(nodeID string) error {
 	if !ok {
 		return fmt.Errorf("node %s not found", nodeID)
 	}
+
+	// Clear node reference on all containers assigned to this node.
+	// Containers are NOT deleted — they become "lost" and the user can clean them up.
+	instMu.Lock()
+	for name, r := range instances {
+		if r.Node == nodeID {
+			r.Node = ""
+			r.Health = "lost"
+			r.HealthReason = "node removed"
+			log.Printf("Container %s marked lost (node %s removed)", name, nodeID)
+		}
+	}
+	instMu.Unlock()
+	saveInstances()
+
 	// Remove from region index
 	ids := regionNodes[rec.Region]
 	for i, id := range ids {
@@ -234,6 +249,39 @@ func getDefaultClient() (*lxc.Client, error) {
 		return getNodeClient(id)
 	}
 	return nil, fmt.Errorf("no nodes available")
+}
+
+// cleanupOrphanContainers finds containers on a node that are not in our
+// registry and deletes them from LXD. This keeps the node clean when
+// the manager's state was lost (e.g., after redeploy with R2 restore).
+func cleanupOrphanContainers(nodeID string) {
+	cli, err := getNodeClient(nodeID)
+	if err != nil {
+		log.Printf("Orphan cleanup: cannot connect to node %s: %v", nodeID, err)
+		return
+	}
+
+	all, err := cli.ListContainers("user-")
+	if err != nil {
+		log.Printf("Orphan cleanup: cannot list containers on node %s: %v", nodeID, err)
+		return
+	}
+
+	instMu.Lock()
+	registered := map[string]bool{}
+	for name := range instances {
+		registered[name] = true
+	}
+	instMu.Unlock()
+
+	for _, c := range all {
+		if !registered[c.Name] {
+			log.Printf("Orphan cleanup: deleting %s from node %s (not in registry)", c.Name, nodeID)
+			if err := cli.DeleteContainer(c.Name); err != nil {
+				log.Printf("Orphan cleanup: failed to delete %s: %v", c.Name, err)
+			}
+		}
+	}
 }
 
 // ==================== SSH Provisioning ====================

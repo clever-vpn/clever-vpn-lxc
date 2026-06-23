@@ -1084,6 +1084,9 @@ func handleNodeAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Clean up orphan containers on this node (exist in LXD but not in our registry)
+	go cleanupOrphanContainers(rec.ID)
+
 	log.Printf("Node %s ready: %s (region=%s)", rec.Name, rec.URL, rec.Region)
 	jsonOK(w, map[string]interface{}{
 		"status": "ready",
