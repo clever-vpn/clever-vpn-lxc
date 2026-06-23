@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Terminal — {{.Name}}</title>
+<title>登录服务器</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css" />
 <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
@@ -12,33 +12,44 @@
   body { background: #1e1e1e; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
   #login {
     position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-    background: #2d2d2d; padding: 32px; border-radius: 8px; text-align: center;
-    color: #ccc; min-width: 320px; z-index: 10;
+    background: #2d2d2d; padding: 36px 32px; border-radius: 10px; text-align: center;
+    color: #ccc; min-width: 360px; z-index: 10; box-shadow: 0 4px 24px rgba(0,0,0,0.4);
   }
-  #login h2 { margin-bottom: 8px; color: #fff; font-size: 18px; }
-  #login .sub { margin-bottom: 20px; color: #888; font-size: 13px; }
-  #login input {
-    width: 100%; padding: 10px; margin-bottom: 12px; border: 1px solid #555;
-    border-radius: 4px; background: #1e1e1e; color: #eee; font-size: 14px;
+  #login h2 { margin-bottom: 4px; color: #fff; font-size: 20px; }
+  #login .sub { margin-bottom: 24px; color: #888; font-size: 13px; line-height: 1.6; }
+  #login .field { text-align: left; margin-bottom: 14px; }
+  #login .field label { display: block; margin-bottom: 4px; font-size: 12px; color: #999; }
+  #login .field input {
+    width: 100%; padding: 10px 12px; border: 1px solid #444;
+    border-radius: 6px; background: #1e1e1e; color: #eee; font-size: 14px;
     outline: none;
   }
-  #login input:focus { border-color: #4fc3f7; }
+  #login .field input:focus { border-color: #4fc3f7; }
+  #login .field input[readonly] { color: #888; background: #252525; border-color: #333; }
   #login button {
-    width: 100%; padding: 10px; background: #4fc3f7; color: #1e1e1e;
-    border: none; border-radius: 4px; font-size: 14px; font-weight: 600;
-    cursor: pointer;
+    width: 100%; padding: 11px; margin-top: 6px; background: #4fc3f7; color: #1a1a1a;
+    border: none; border-radius: 6px; font-size: 14px; font-weight: 600;
+    cursor: pointer; transition: background 0.2s;
   }
-  #login button:disabled { opacity: 0.5; cursor: default; }
-  #login .error { color: #ef5350; margin-top: 8px; font-size: 13px; display: none; }
+  #login button:hover { background: #81d4fa; }
+  #login button:disabled { opacity: 0.4; cursor: default; }
+  #login .error { color: #ef5350; margin-top: 12px; font-size: 13px; display: none; }
   #terminal { position: absolute; top: 0; left: 0; right: 0; bottom: 0; display: none; }
 </style>
 </head>
 <body>
 <div id="login">
-  <h2>{{.Name}}</h2>
-  <div class="sub">Enter root password to connect</div>
-  <input type="password" id="password" placeholder="Password" autofocus />
-  <button id="connectBtn" onclick="connect()">Connect</button>
+  <h2>登录您的服务器</h2>
+  <div class="sub">请输入 root 密码进入命令行</div>
+  <div class="field">
+    <label>用户名</label>
+    <input type="text" value="root" readonly />
+  </div>
+  <div class="field">
+    <label>密码</label>
+    <input type="password" id="password" placeholder="请输入密码" autofocus />
+  </div>
+  <button id="connectBtn" onclick="connect()">连接</button>
   <div class="error" id="error"></div>
 </div>
 <div id="terminal"></div>
@@ -55,8 +66,8 @@ function showError(msg) {
 function connect() {
   var btn = document.getElementById('connectBtn');
   var pw = document.getElementById('password').value;
-  if (!pw) { showError('Password required'); return; }
-  btn.disabled = true; btn.textContent = 'Connecting...';
+  if (!pw) { showError('请输入密码'); return; }
+  btn.disabled = true; btn.textContent = '连接中...';
   document.getElementById('error').style.display = 'none';
 
   var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -83,12 +94,12 @@ function connect() {
   ws.onmessage = function(evt) { if (term) term.write(new Uint8Array(evt.data)); };
 
   ws.onclose = function() {
-    if (term) term.write('\r\n\u001b[31mConnection closed.\u001b[0m\r\n');
-    btn.disabled = false; btn.textContent = 'Reconnect';
+    if (term) term.write('\r\n\u001b[31m连接已断开。\u001b[0m\r\n');
+    btn.disabled = false; btn.textContent = '重新连接';
     document.getElementById('login').style.display = 'block';
   };
 
-  ws.onerror = function() { showError('Connection failed'); btn.disabled = false; btn.textContent = 'Connect'; };
+  ws.onerror = function() { showError('无法连接，请检查密码是否正确'); btn.disabled = false; btn.textContent = '连接'; };
 }
 
 document.getElementById('password').addEventListener('keydown', function(e) {

@@ -356,8 +356,8 @@ func cmdBackup() {
 func cmdRestore() {
 	loadConfig(configFilePath())
 	if err := restoreFromR2(); err != nil {
-		fmt.Fprintf(os.Stderr, "Restore failed: %v\n", err)
-		os.Exit(1)
+		fmt.Printf("Restore skipped: %v\n", err)
+		return
 	}
 	fmt.Println("Restore complete.")
 }
