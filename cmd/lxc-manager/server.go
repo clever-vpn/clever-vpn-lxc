@@ -88,6 +88,8 @@ type InstanceRecord struct {
 	Node           string    `json:"nodeID"`
 	Region         string    `json:"region"`
 	StaticIP       string    `json:"staticIP,omitempty"`
+	NodePublicIP   string    `json:"nodePublicIP,omitempty"`
+	UserData       string    `json:"userData,omitempty"`
 	Created        time.Time `json:"created"`
 	Health         string    `json:"health"`
 	HealthReason   string    `json:"healthReason,omitempty"`
@@ -483,7 +485,15 @@ func createContainerCore(userID string, userData string, cpu, mem, disk, service
 		Node:        nodeID,
 		Region:      region,
 		Health:      "healthy",
+		UserData:    userData,
 	}
+
+	// Save node's public IP for disaster recovery (re-create container if node is rebuilt with same IP)
+	nodesMu.Lock()
+	if n, ok := nodes[nodeID]; ok {
+		rec.NodePublicIP = n.SSHHost
+	}
+	nodesMu.Unlock()
 
 	password := ""
 	if strings.TrimSpace(userData) == "" {
@@ -1176,6 +1186,9 @@ func handleNodeAdd(w http.ResponseWriter, r *http.Request) {
 
 	// Clean up orphan containers on this node (exist in LXD but not in our registry)
 	go cleanupOrphanContainers(rec.ID)
+
+	// Recover lost containers that belonged to a node with the same public IP
+	go recoverOrphanContainersByPublicIP(rec.ID, req.SSHHost)
 
 	log.Printf("Node %s ready: %s (region=%s)", rec.Name, rec.URL, rec.Region)
 	jsonOK(w, map[string]interface{}{

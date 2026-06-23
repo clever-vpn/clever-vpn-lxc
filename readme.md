@@ -122,6 +122,32 @@ Authorization: Bearer cvl_xxxxxxxx
 }
 ```
 
+### 灾难恢复
+
+节点删除时容器自动标记为 `lost`。重新添加同 IP 的节点后，系统自动恢复所有丢失的容器（保留端口和 Internal IP）。
+
+```json
+POST /api/nodes
+Authorization: Bearer cva_xxxxxxxx
+{
+  "name":        "node-nrt",
+  "region":      "nrt",
+  "sshHost":     "45.77.16.224",
+  "sshPort":     22,
+  "sshPassword": "...",
+  "poolSize":    "10"
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `name` | string | ✅ | 节点名称 |
+| `region` | string | ✅ | 区域 ID |
+| `sshHost` | string | ✅ | SSH 地址（同时作为公网 IP 标识） |
+| `sshPort` | int | ❌ | SSH 端口，默认 22 |
+| `sshPassword` | string | ✅ | root 密码 |
+| `poolSize` | string | ❌ | btrfs 存储池大小 (GiB)，默认 10 |
+
 ### 调整规格
 
 可单独调整任一参数，0 表示保持不变。
@@ -241,7 +267,8 @@ POST /api/nodes
       "network": "vpnbr0",
       "sshHost": "192.168.1.10",
       "sshPort": 22,
-      "image": "clever-vpn-base"
+      "image": "clever-vpn-base",
+      "poolSize": "10"
     }
   ]
 }
@@ -262,6 +289,9 @@ POST /api/nodes
       "password": "Ab3Xy9...",
       "nodeID": "nd_abc123",
       "region": "nrt",
+      "staticIP": "10.0.1.100",
+      "nodePublicIP": "45.77.16.224",
+      "userData": "#cloud-config\n...",
       "health": "healthy",
       "created": "2026-06-21T10:30:00Z"
     }
@@ -275,7 +305,10 @@ POST /api/nodes
 | `userID` | 所属用户 ID |
 | `nodeID` | 所在节点 ID（空表示已丢失） |
 | `region` | 区域 ID |
-| `health` | 健康状态：`healthy`/`unhealthy`/`lost`/`stopped` |
+| `staticIP` | 容器内网 IP（10.0.1.x），端口转发目标 |
+| `nodePublicIP` | 节点公网 IP，用于灾难恢复匹配 |
+| `userData` | 创建时的 cloud-init 配置，用于重建容器 |
+| `health` | 健康状态：`healthy`/`unhealthy`/`lost`/`stopped`/`creating` |
 
 ## 容器安全设置
 
