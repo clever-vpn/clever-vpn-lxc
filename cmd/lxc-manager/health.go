@@ -51,9 +51,14 @@ func checkAllContainers() {
 
 func checkContainer(name string) {
 	instMu.Lock()
-	_, exists := instances[name]
+	rec, exists := instances[name]
 	instMu.Unlock()
 	if !exists {
+		return
+	}
+
+	// Container has no node assigned (e.g. node was removed) — stay lost, don't re-check.
+	if rec.Node == "" && rec.Health == healthLost {
 		return
 	}
 

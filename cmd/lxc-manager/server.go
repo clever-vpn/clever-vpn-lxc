@@ -1047,7 +1047,7 @@ func handleAdminListContainers(w http.ResponseWriter, r *http.Request) {
 			"userID":       rec.UserID,
 			"userName":     userName,
 			"password":     rec.Password,
-			"status":       "unknown",
+			"status":       rec.Health,
 			"cpu":          rec.CPU,
 			"mem":          rec.Mem,
 			"disk":         rec.Disk,
