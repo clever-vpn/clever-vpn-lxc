@@ -1,6 +1,7 @@
 package lxc
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -195,6 +196,29 @@ func (c *Client) InstanceIPv4(name string, timeout time.Duration) (string, error
 		time.Sleep(time.Second)
 	}
 	return "", fmt.Errorf("timed out waiting for IPv4 for %s", name)
+}
+
+
+// ExecCheck runs a lightweight command inside a container to verify it is responsive.
+// Returns nil if the command exits with code 0 within the given timeout.
+func (c *Client) ExecCheck(name string, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	req := api.InstanceExecPost{
+		Command:   []string{"echo", "ok"},
+		WaitForWS: false,
+	}
+
+	op, err := c.server.ExecInstance(name, req, nil)
+	if err != nil {
+		return fmt.Errorf("exec %s: %w", name, err)
+	}
+	if err := op.WaitContext(ctx); err != nil {
+		return fmt.Errorf("exec %s: %w", name, err)
+	}
+
+	return nil
 }
 
 func toContainer(inst *api.Instance, state *api.InstanceState) *Container {

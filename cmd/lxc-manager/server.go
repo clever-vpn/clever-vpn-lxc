@@ -85,6 +85,8 @@ type InstanceRecord struct {
 	Password       string    `json:"password,omitempty"`
 	Node           string    `json:"node"`
 	Created        time.Time `json:"created"`
+	Health         string    `json:"health"`
+	HealthReason   string    `json:"healthReason,omitempty"`
 }
 
 var (
@@ -395,6 +397,7 @@ func handleCreate(w http.ResponseWriter, r *http.Request) {
 		UserID:      userID,
 		Token:       getBearerToken(r),
 		Node:        nodeID,
+		Health:      "healthy",
 	}
 
 	password := ""
@@ -507,6 +510,16 @@ func handleList(w http.ResponseWriter, r *http.Request) {
 			var entry map[string]interface{}
 			json.Unmarshal(data, &entry)
 			entry["terminalUrl"] = fmt.Sprintf("https://%s/terminal/%s", cfg.Domain, c.Name)
+
+			instMu.Lock()
+			if r, ok := instances[c.Name]; ok {
+				entry["health"] = r.Health
+				if r.HealthReason != "" {
+					entry["healthReason"] = r.HealthReason
+				}
+			}
+			instMu.Unlock()
+
 			result = append(result, entry)
 		}
 	}
@@ -545,6 +558,10 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 	var resp map[string]interface{}
 	json.Unmarshal(data, &resp)
 	resp["terminalUrl"] = fmt.Sprintf("https://%s/terminal/%s", cfg.Domain, name)
+	resp["health"] = rec.Health
+	if rec.HealthReason != "" {
+		resp["healthReason"] = rec.HealthReason
+	}
 	jsonOK(w, resp)
 }
 
@@ -788,6 +805,7 @@ func handleAdminCreateContainer(w http.ResponseWriter, r *http.Request) {
 		UserID:      req.UserID,
 		Token:       getBearerToken(r),
 		Node:        nodeID,
+		Health:      "healthy",
 	}
 
 	password := genPasswd()
@@ -861,19 +879,21 @@ func handleAdminListContainers(w http.ResponseWriter, r *http.Request) {
 			userName = ur.Name
 		}
 		result = append(result, map[string]interface{}{
-			"name":        name,
-			"userID":      rec.UserID,
-			"userName":    userName,
-			"password":    rec.Password,
-			"status":      "unknown",
-			"cpu":         rec.CPU,
-			"mem":         rec.Mem,
-			"disk":        rec.Disk,
-			"servicePort": rec.ServicePort,
-			"node":        rec.Node,
-			"ports":       map[string]int{"ssh": rec.SSHExtPort, "service": rec.ServiceExtPort},
-			"created":     rec.Created.Format(time.RFC3339),
-			"terminalUrl": fmt.Sprintf("https://%s/terminal/%s", cfg.Domain, name),
+			"name":         name,
+			"userID":       rec.UserID,
+			"userName":     userName,
+			"password":     rec.Password,
+			"status":       "unknown",
+			"cpu":          rec.CPU,
+			"mem":          rec.Mem,
+			"disk":         rec.Disk,
+			"servicePort":  rec.ServicePort,
+			"node":         rec.Node,
+			"ports":        map[string]int{"ssh": rec.SSHExtPort, "service": rec.ServiceExtPort},
+			"created":      rec.Created.Format(time.RFC3339),
+			"terminalUrl":  fmt.Sprintf("https://%s/terminal/%s", cfg.Domain, name),
+			"health":       rec.Health,
+			"healthReason": rec.HealthReason,
 		})
 	}
 	instMu.Unlock()
