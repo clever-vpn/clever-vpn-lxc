@@ -189,6 +189,7 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
   "disk":        10,
   "servicePort": 8080,
   "region":      "nrt",
+  "planId":      "lxc-1c-512mb",
   "userData":    "#cloud-config\n..."
 }
 ```
@@ -199,7 +200,8 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 | `mem` | int | ❌ | 内存限制 (MB)，默认 512 |
 | `disk` | int | ❌ | 磁盘上限 (GB)，0 或不传 = 不受限 |
 | `servicePort` | int | ✅ | 容器内服务端口 (1-65535) |
-| `region` | string | ❌ | 区域 ID（如 `nrt`），同区域多节点轮询分配 |
+| `region` | string | ❌ | 区域 ID（如 `nrt`），同区域多节点轮询分配。不传则随机选节点 |
+| `planId` | string | ❌ | 套餐 ID，自动填充 cpu/mem/disk（与显式指定可共存） |
 | `userData` | string | ❌ | cloud-init user-data；为空时自动生成密码 |
 
 **响应** `200`：
@@ -386,11 +388,12 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
   "disk":        10,
   "servicePort": 8080,
   "region":      "nrt",
+  "planId":      "lxc-1c-512mb",
   "userData":    "#cloud-config\n..."
 }
 ```
 
-> `userID` 必填，其余同用户 `POST /api/containers`。
+> `userID` 必填，其余字段同用户 `POST /api/containers`（含 `planId`）。
 
 #### `GET /api/admin/containers` — 列出所有容器
 
