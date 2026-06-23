@@ -75,15 +75,17 @@ runcmd:
     curl -fsSLo "$SHA" "$SHA_URL"
     curl -fsSLo "$ASSET" "$DL_URL"
 
-    EXPECTED=$(awk '{print $1}' "$SHA")
-    ACTUAL=$(sha256sum "$ASSET" | awk '{print $1}')
-    if [ "$EXPECTED" != "$ACTUAL" ]; then
-      echo "ERROR: checksum mismatch"
-      exit 1
-    fi
-
     gunzip "$ASSET"
     BIN="lxc-manager-$GOARCH-$TAG"
+
+    EXPECTED=$(awk '{print $1}' "$SHA")
+    ACTUAL=$(sha256sum "$BIN" | awk '{print $1}')
+    if [ "$EXPECTED" != "$ACTUAL" ]; then
+      echo "ERROR: checksum mismatch for $BIN"
+      echo "Expected: $EXPECTED"
+      echo "Actual:   $ACTUAL"
+      exit 1
+    fi
     chmod +x "$BIN"
     mv "$BIN" /usr/local/bin/lxc-manager
     echo "lxc-manager installed successfully"
