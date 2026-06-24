@@ -37,7 +37,7 @@ type CreateReq struct {
 
 type CreateResp struct {
 	Status   string   `json:"status"`
-	Name     string   `json:"name"`
+	ID       string   `json:"id"`
 	Password string   `json:"password,omitempty"`
 	Ports    PortInfo `json:"ports"`
 	CPU      int      `json:"cpu"`
@@ -710,7 +710,7 @@ func handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := CreateResp{Status: "creating", Name: rec.Name, Ports: ports, CPU: rec.CPU, Mem: rec.Mem, Disk: rec.Disk, NodeID: rec.Node, Region: rec.Region, PublicIP: getNodePublicIP(rec.Node)}
+	resp := CreateResp{Status: "creating", ID: rec.Name, Ports: ports, CPU: rec.CPU, Mem: rec.Mem, Disk: rec.Disk, NodeID: rec.Node, Region: rec.Region, PublicIP: getNodePublicIP(rec.Node)}
 	if rec.Password != "" {
 		resp.Password = rec.Password
 	}
@@ -1040,7 +1040,7 @@ func handleRefreshContainer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := map[string]interface{}{
-		"name":        rec.Name,
+		"id":          rec.Name,
 		"state":       rec.State,
 		"region":      rec.Region,
 		"nodeID":      rec.Node,
@@ -1192,7 +1192,7 @@ func handleAdminCreateContainer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := CreateResp{Status: "creating", Name: rec.Name, Ports: ports, CPU: rec.CPU, Mem: rec.Mem, Disk: rec.Disk, NodeID: rec.Node, Region: rec.Region, PublicIP: getNodePublicIP(rec.Node)}
+	resp := CreateResp{Status: "creating", ID: rec.Name, Ports: ports, CPU: rec.CPU, Mem: rec.Mem, Disk: rec.Disk, NodeID: rec.Node, Region: rec.Region, PublicIP: getNodePublicIP(rec.Node)}
 	if rec.Password != "" {
 		resp.Password = rec.Password
 	}
@@ -1226,7 +1226,7 @@ func handleAdminListContainers(w http.ResponseWriter, r *http.Request) {
 			userName = ur.Name
 		}
 		result = append(result, map[string]interface{}{
-			"name":         name,
+			"id":           name,
 			"userID":       rec.UserID,
 			"userName":     userName,
 			"password":     rec.Password,
@@ -1528,7 +1528,7 @@ func handleNodeContainers(w http.ResponseWriter, r *http.Request) {
 	for name, rec := range instances {
 		if rec.Node == nodeID {
 			result = append(result, map[string]interface{}{
-				"name":   name,
+				"id":     name,
 				"userID": rec.UserID,
 				"plan":   map[string]int{"cpu": rec.CPU, "mem": rec.Mem, "disk": rec.Disk},
 				"ports":  map[string]int{"ssh": rec.SSHExtPort, "service": rec.ServiceExtPort},

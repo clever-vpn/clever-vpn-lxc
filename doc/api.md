@@ -209,7 +209,7 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 ```json
 {
   "status": "creating",
-  "name": "user-a1b2c3d4",
+  "id": "user-a1b2c3d4",
   "password": "Abc123Xyz",
   "cpu": 1,
   "mem": 512,
@@ -237,7 +237,7 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 **响应** `200`：
 ```json
 {
-  "name": "user-a1b2c3d4",
+  "id": "user-a1b2c3d4",
   "state": "running",
   "terminalUrl": "https://lxc-api.clever-clouds.com/terminal/user-a1b2c3d4",
   "region": "nrt",
@@ -539,7 +539,7 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 **响应** `200`：
 ```json
 {
-  "name": "my-container",
+  "id": "my-container",
   "state": "running",
   "region": "nrt",
   "nodeID": "nd_abc123",
