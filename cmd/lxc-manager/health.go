@@ -37,6 +37,9 @@ func startHealthCheckLoop() {
 }
 
 func checkAllContainers() {
+	// Check node health first — container health depends on it.
+	checkAllNodes()
+
 	instMu.Lock()
 	names := make([]string, 0, len(instances))
 	for name := range instances {
@@ -47,9 +50,6 @@ func checkAllContainers() {
 	for _, name := range names {
 		checkContainer(name)
 	}
-
-	// Also check node health
-	checkAllNodes()
 }
 
 func checkAllNodes() {
@@ -73,8 +73,8 @@ func checkNodeHealth(nodeID string) {
 		return
 	}
 
-	if n.Status == "rebuilding" {
-		return // don't interfere with rebuild
+	if n.Status == "rebuilding" || n.Status == "creating" {
+		return // don't interfere with provisioning/rebuild
 	}
 
 	cli, err := getNodeClient(nodeID)
@@ -101,29 +101,47 @@ func checkContainer(name string) {
 		return
 	}
 
-	// Container has no node assigned (e.g. node was removed) — stay lost, don't re-check.
-	if rec.Node == "" && rec.Health == healthLost {
+	// No node assigned → lost
+	if rec.Node == "" {
+		if rec.Health != healthLost {
+			setHealth(name, healthLost, "no node assigned")
+		}
 		return
 	}
 
+	// Node status determines container health
+	nodeStatus := getNodeStatus(rec.Node)
+	switch nodeStatus {
+	case "":
+		setHealth(name, healthLost, "node not found in registry")
+		return
+	case "offline":
+		setHealth(name, healthUnhealthy, "node is offline")
+		return
+	case "degraded", "creating", "rebuilding":
+		setHealth(name, healthUnhealthy, "node is "+nodeStatus)
+		return
+	}
+
+	// Node is active — do full per-container health check
 	cli := clientForInstance(name)
 	if cli == nil {
-		setHealth(name, healthLost, "no LXD client available")
+		setHealth(name, healthLost, "no LXD client for active node")
 		return
 	}
 
 	c, err := cli.GetContainer(name)
 	if err != nil {
-		setHealth(name, healthLost, "container not found on node — may have been deleted or node is down")
+		setHealth(name, healthLost, "not found on node")
 		return
 	}
 
 	if c.Status != "Running" {
-		setHealth(name, healthStopped, "container status is "+c.Status)
+		setHealth(name, healthStopped, "status is "+c.Status)
 		return
 	}
 
-	// Container is Running — verify it responds to commands
+	// Running — verify it responds to commands
 	if err := cli.ExecCheck(name, healthExecTimeout); err != nil {
 		healthMu.Lock()
 		healthFails[name]++
@@ -131,17 +149,27 @@ func checkContainer(name string) {
 		healthMu.Unlock()
 
 		if fails >= healthMaxFails {
-			setHealth(name, healthUnhealthy, fmt.Sprintf("not responding after %d exec checks", fails))
+			setHealth(name, healthUnhealthy, fmt.Sprintf("exec failed %d times", fails))
 		}
 		return
 	}
 
-	// Success — reset
+	// Success
 	healthMu.Lock()
 	delete(healthFails, name)
 	healthMu.Unlock()
 
 	setHealth(name, healthHealthy, "")
+}
+
+// getNodeStatus returns the status of a node without locking instMu.
+func getNodeStatus(nodeID string) string {
+	nodesMu.Lock()
+	defer nodesMu.Unlock()
+	if n, ok := nodes[nodeID]; ok {
+		return n.Status
+	}
+	return ""
 }
 
 func setHealth(name, status, reason string) {
