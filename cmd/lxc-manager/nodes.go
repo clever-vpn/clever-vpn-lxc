@@ -310,11 +310,40 @@ func rebuildNode(nodeID string) error {
 	instMu.Unlock()
 	saveInstances()
 
-	// Full rebuild: recreate all containers for this node from instances.json
-	go recreateAllContainersOnNode(nodeID)
+	// Remove stale client from pool so the goroutine gets a fresh connection
+	removeNodeClient(nodeID)
 
-	setNodeStatus(nodeID, "active", "")
-	log.Printf("Node %s rebuild initiated, full container recreation in progress", n.Name)
+	// Full rebuild: recreate all containers for this node in background.
+	// Status stays "rebuilding" until the goroutine finishes.
+	go func() {
+		recreateAllContainersOnNode(nodeID)
+		// After rebuild, set status to active (or degraded if something went wrong)
+		nodesMu.Lock()
+		if n, ok := nodes[nodeID]; ok {
+			// Check if any containers are still lost/creating → keep degraded
+			instMu.Lock()
+			allHealthy := true
+			for _, rec := range instances {
+				if rec.Node == nodeID && (rec.Health == healthLost || rec.Health == "creating") {
+					allHealthy = false
+					break
+				}
+			}
+			instMu.Unlock()
+			if allHealthy {
+				n.Status = "active"
+				n.StatusReason = ""
+			} else {
+				n.Status = "degraded"
+				n.StatusReason = "some containers failed to recover"
+			}
+		}
+		nodesMu.Unlock()
+		saveNodes()
+		log.Printf("Node %s rebuild complete (status=%s)", nodeID, n.Status)
+	}()
+
+	log.Printf("Node %s rebuild initiated, status=rebuilding", n.Name)
 	return nil
 }
 
