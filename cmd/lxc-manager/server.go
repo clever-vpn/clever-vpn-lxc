@@ -783,6 +783,14 @@ func handleList(w http.ResponseWriter, r *http.Request) {
 		ownedSet[n] = true
 	}
 
+	// Pre-collect node public IPs to avoid nested lock (instMu → nodesMu)
+	nodeIPs := make(map[string]string)
+	nodesMu.Lock()
+	for id, n := range nodes {
+		nodeIPs[id] = n.SSHHost
+	}
+	nodesMu.Unlock()
+
 	result := make([]map[string]interface{}, 0)
 	for _, c := range all {
 		if ownedSet[c.Name] {
@@ -799,7 +807,7 @@ func handleList(w http.ResponseWriter, r *http.Request) {
 				}
 				entry["region"] = r.Region
 				entry["nodeID"] = r.Node
-				entry["publicIP"] = getNodePublicIP(r.Node)
+				entry["publicIP"] = nodeIPs[r.Node]
 			}
 			instMu.Unlock()
 
@@ -1187,6 +1195,14 @@ func handleAdminCreateContainer(w http.ResponseWriter, r *http.Request) {
 func handleAdminListContainers(w http.ResponseWriter, r *http.Request) {
 	filterUserID := r.URL.Query().Get("userID")
 
+	// Pre-collect node public IPs to avoid nested lock (instMu → nodesMu)
+	nodeIPs := make(map[string]string)
+	nodesMu.Lock()
+	for id, n := range nodes {
+		nodeIPs[id] = n.SSHHost
+	}
+	nodesMu.Unlock()
+
 	instMu.Lock()
 	var result []map[string]interface{}
 	for name, rec := range instances {
@@ -1209,7 +1225,7 @@ func handleAdminListContainers(w http.ResponseWriter, r *http.Request) {
 			"servicePort":  rec.ServicePort,
 			"region":       rec.Region,
 			"node":         rec.Node,
-			"publicIP":     getNodePublicIP(rec.Node),
+			"publicIP":     nodeIPs[rec.Node],
 			"ports":        map[string]int{"ssh": rec.SSHExtPort, "service": rec.ServiceExtPort},
 			"created":      rec.Created.Format(time.RFC3339),
 			"terminalUrl":  fmt.Sprintf("https://%s/terminal/%s", cfg.Domain, name),

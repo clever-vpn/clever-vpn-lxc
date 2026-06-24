@@ -324,33 +324,38 @@ func rebuildNode(nodeID string) error {
 	// Full rebuild: recreate all containers for this node in background.
 	go func() {
 		recreateAllContainersOnNode(nodeID)
-		nodesMu.Lock()
-		if n, ok := nodes[nodeID]; ok {
-			if !hasContainers {
-				n.Status = "active"
-				n.StatusReason = ""
-			} else {
-				instMu.Lock()
-				allHealthy := true
-				for _, rec := range instances {
-					if rec.Node == nodeID && (rec.State == stateLost || rec.State == "creating") {
-						allHealthy = false
-						break
-					}
-				}
-				instMu.Unlock()
-				if allHealthy {
-					n.Status = "active"
-					n.StatusReason = ""
-				} else {
-					n.Status = "degraded"
-					n.StatusReason = "some containers failed to recover"
+
+		// Determine final status — collect container health outside nodesMu lock
+		// to avoid lock ordering inversion (nodesMu → instMu vs instMu → nodesMu).
+		allHealthy := true
+		instMu.Lock()
+		if hasContainers {
+			for _, rec := range instances {
+				if rec.Node == nodeID && (rec.State == stateLost || rec.State == "creating") {
+					allHealthy = false
+					break
 				}
 			}
 		}
+		instMu.Unlock()
+
+		nodesMu.Lock()
+		if n, ok := nodes[nodeID]; ok {
+			if allHealthy {
+				n.Status = "active"
+				n.StatusReason = ""
+			} else {
+				n.Status = "degraded"
+				n.StatusReason = "some containers failed to recover"
+			}
+		}
+		status := ""
+		if n, ok := nodes[nodeID]; ok {
+			status = n.Status
+		}
 		nodesMu.Unlock()
 		saveNodes()
-		log.Printf("Node %s rebuild complete (status=%s)", nodeID, n.Status)
+		log.Printf("Node %s rebuild complete (status=%s)", nodeID, status)
 	}()
 
 	log.Printf("Node %s rebuild initiated, status=rebuilding", n.Name)
