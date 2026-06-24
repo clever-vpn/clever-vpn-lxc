@@ -7,32 +7,34 @@ import (
 	"time"
 )
 
-// Health states for containers.
+// Container states.
 const (
-	healthHealthy   = "healthy"
-	healthUnhealthy = "unhealthy"
-	healthLost      = "lost"    // node removed, container has no node
-	healthStopped   = "stopped"
-	healthFailed    = "failed"  // auto-recovery failed, needs admin intervention
+	stateRunning    = "running"
+	stateUnhealthy  = "unhealthy"
+	stateLost       = "lost"    // node removed, container has no node
+	stateStopped    = "stopped"
+	stateFailed     = "failed"  // auto-recovery failed, needs admin intervention
+	stateCreating   = "creating"
+	stateRecovering = "recovering"
 )
 
 var (
-	healthMu    sync.Mutex
-	healthFails = map[string]int{} // container name → consecutive failures
+	stateMu    sync.Mutex
+	stateFails = map[string]int{} // container name → consecutive failures
 )
 
-const healthCheckInterval = 60 * time.Second
-const healthMaxFails = 3
-const healthExecTimeout = 5 * time.Second
+const stateCheckInterval = 60 * time.Second
+const stateMaxFails = 3
+const stateExecTimeout = 5 * time.Second
 
-// startHealthCheckLoop periodically checks the health of all registered containers.
-func startHealthCheckLoop() {
-	log.Printf("Health: checking every %s, max %d consecutive failures", healthCheckInterval, healthMaxFails)
+// startStateCheckLoop periodically checks the state of all registered containers.
+func startStateCheckLoop() {
+	log.Printf("State: checking every %s, max %d consecutive failures", stateCheckInterval, stateMaxFails)
 	go func() {
 		time.Sleep(15 * time.Second) // wait for initial startup
 		for {
 			checkAllContainers()
-			time.Sleep(healthCheckInterval)
+			time.Sleep(stateCheckInterval)
 		}
 	}()
 }
@@ -110,23 +112,23 @@ func checkContainer(name string) {
 
 	// No node assigned → lost
 	if rec.Node == "" {
-		if rec.Health != healthLost {
-			setHealth(name, healthLost, "no node assigned")
+		if rec.State != stateLost {
+			setState(name, stateLost, "no node assigned")
 		}
 		return
 	}
 
-	// Node status determines container health
+	// Node status determines container state
 	nodeStatus := getNodeStatus(rec.Node)
 	switch nodeStatus {
 	case "":
-		setHealth(name, healthLost, "node not found in registry")
+		setState(name, stateLost, "node not found in registry")
 		return
 	case "offline":
-		setHealth(name, healthUnhealthy, "node is offline")
+		setState(name, stateUnhealthy, "node is offline")
 		return
 	case "degraded", "creating", "rebuilding":
-		setHealth(name, healthUnhealthy, "node is "+nodeStatus)
+		setState(name, stateUnhealthy, "node is "+nodeStatus)
 		return
 	}
 
@@ -134,7 +136,7 @@ func checkContainer(name string) {
 	nodeID := rec.Node
 	cli := clientForInstance(name)
 	if cli == nil {
-		setHealth(name, healthLost, "no LXD client for active node")
+		setState(name, stateLost, "no LXD client for active node")
 		return
 	}
 
@@ -145,36 +147,36 @@ func checkContainer(name string) {
 		rec, exists := instances[name]
 		instMu.Unlock()
 		if exists && rec.Node == nodeID {
-			setHealth(name, "recovering", "not found on node, attempting auto-recovery")
+			setState(name, stateRecovering, "not found on node, attempting auto-recovery")
 			go recoverMissingContainer(rec)
 		}
 		return
 	}
 
 	if c.Status != "Running" {
-		setHealth(name, healthStopped, "status is "+c.Status)
+		setState(name, stateStopped, "status is "+c.Status)
 		return
 	}
 
 	// Running — verify it responds to commands
-	if err := cli.ExecCheck(name, healthExecTimeout); err != nil {
-		healthMu.Lock()
-		healthFails[name]++
-		fails := healthFails[name]
-		healthMu.Unlock()
+	if err := cli.ExecCheck(name, stateExecTimeout); err != nil {
+		stateMu.Lock()
+		stateFails[name]++
+		fails := stateFails[name]
+		stateMu.Unlock()
 
-		if fails >= healthMaxFails {
-			setHealth(name, healthUnhealthy, fmt.Sprintf("exec failed %d times", fails))
+		if fails >= stateMaxFails {
+			setState(name, stateUnhealthy, fmt.Sprintf("exec failed %d times", fails))
 		}
 		return
 	}
 
 	// Success
-	healthMu.Lock()
-	delete(healthFails, name)
-	healthMu.Unlock()
+	stateMu.Lock()
+	delete(stateFails, name)
+	stateMu.Unlock()
 
-	setHealth(name, healthHealthy, "")
+	setState(name, stateRunning, "")
 }
 
 // getNodeStatus returns the status of a node without locking instMu.
@@ -187,7 +189,7 @@ func getNodeStatus(nodeID string) string {
 	return ""
 }
 
-func setHealth(name, status, reason string) {
+func setState(name, status, reason string) {
 	instMu.Lock()
 	rec, exists := instances[name]
 	if !exists {
@@ -195,13 +197,13 @@ func setHealth(name, status, reason string) {
 		return
 	}
 
-	prev := rec.Health
-	rec.Health = status
-	rec.HealthReason = reason
+	prev := rec.State
+	rec.State = status
+	rec.StateReason = reason
 	instMu.Unlock()
 
 	if prev != status {
-		log.Printf("Health: %s → %s (reason: %s)", name, status, reason)
+		log.Printf("State: %s → %s (reason: %s)", name, status, reason)
 	}
 }
 
@@ -211,7 +213,7 @@ func recoverMissingContainer(rec *InstanceRecord) {
 	cli, err := getNodeClient(rec.Node)
 	if err != nil {
 		log.Printf("Auto-recovery %s: cannot connect to node %s: %v", rec.Name, rec.Node, err)
-		setHealth(rec.Name, healthFailed, fmt.Sprintf("auto-recovery failed: %v", err))
+		setState(rec.Name, stateFailed, fmt.Sprintf("auto-recovery failed: %v", err))
 		return
 	}
 
@@ -227,13 +229,13 @@ func recoverMissingContainer(rec *InstanceRecord) {
 	if err := cli.CreateContainer(rec.Name, img, net, rec.StaticIP, rec.CPU, rec.Mem, rec.Disk,
 		map[string]string{"cloud-init.user-data": cloudConfig}); err != nil {
 		log.Printf("Auto-recovery %s: create failed: %v", rec.Name, err)
-		setHealth(rec.Name, healthFailed, fmt.Sprintf("auto-recovery create failed: %v", err))
+		setState(rec.Name, stateFailed, fmt.Sprintf("auto-recovery create failed: %v", err))
 		return
 	}
 
 	if err := cli.StartContainer(rec.Name); err != nil {
 		log.Printf("Auto-recovery %s: start failed: %v", rec.Name, err)
-		setHealth(rec.Name, healthFailed, fmt.Sprintf("auto-recovery start failed: %v", err))
+		setState(rec.Name, stateFailed, fmt.Sprintf("auto-recovery start failed: %v", err))
 		return
 	}
 
@@ -244,7 +246,7 @@ func recoverMissingContainer(rec *InstanceRecord) {
 		if err := addPortForward(rec.Node, rec.ServiceExtPort, rec.StaticIP, rec.ServicePort); err != nil {
 			log.Printf("Auto-recovery %s: forward svc: %v", rec.Name, err)
 		}
-		setHealth(rec.Name, healthHealthy, "")
+		setState(rec.Name, stateRunning, "")
 		log.Printf("Auto-recovery: %s restored successfully", rec.Name)
 	}()
 }

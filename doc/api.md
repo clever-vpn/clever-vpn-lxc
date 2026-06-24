@@ -225,7 +225,7 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 
 **请求头**：`Authorization: Bearer <user-token>`
 
-**响应** `200`：容器列表，包含 `terminalUrl`、`health`、`region`、`nodeID` 和 `publicIP` 字段。
+**响应** `200`：容器列表，包含 `terminalUrl`、`state`、`region`、`nodeID` 和 `publicIP` 字段。
 
 ### `GET /api/containers/{name}` — 获取容器详情
 
@@ -237,15 +237,19 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 ```json
 {
   "name": "user-a1b2c3d4",
-  "status": "Running",
+  "state": "running",
   "terminalUrl": "https://lxc-api.clever-clouds.com/terminal/user-a1b2c3d4",
-  "health": "healthy",
   "region": "nrt",
   "nodeID": "nd_abc123",
   "publicIP": "203.0.113.5",
   "...": "..."
 }
 ```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `state` | string | 容器状态，见[容器状态](#容器状态) |
+| `stateReason` | string | 状态原因（非 `running` 时出现） |
 
 ### `POST /api/containers/{name}/start` — 启动容器
 
@@ -258,25 +262,6 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 ### `POST /api/containers/{name}/restart` — 重启容器
 
 **请求头**：`Authorization: Bearer <user-token>`
-
-### `POST /api/containers/{name}/refresh` — 立即刷新容器状态
-
-触发即时健康检查：先检查所属节点连通性，再检查容器运行状态，完成后返回最新的容器记录。
-
-**请求头**：`Authorization: Bearer <user-token>`
-
-**响应** `200`：
-```json
-{
-  "name": "my-container",
-  "health": "healthy",
-  "region": "nrt",
-  "nodeID": "nd_abc123",
-  "publicIP": "1.2.3.4",
-  "terminalUrl": "https://lxc-api.clever-clouds.com/terminal/my-container",
-  "status": "refreshed"
-}
-```
 
 ### `PUT /api/containers/{name}/resize` — 调整容器规格
 
@@ -544,6 +529,24 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 
 #### `POST /api/admin/containers/{name}/restart`
 
+#### `POST /api/admin/containers/{name}/refresh` — 立即刷新容器状态
+
+触发即时状态检查：先检查所属节点连通性，再检查容器运行状态，完成后返回最新的容器记录。
+
+**请求头**：`Authorization: Bearer <admin-token>`
+
+**响应** `200`：
+```json
+{
+  "name": "my-container",
+  "state": "running",
+  "region": "nrt",
+  "nodeID": "nd_abc123",
+  "publicIP": "1.2.3.4",
+  "terminalUrl": "https://lxc-api.clever-clouds.com/terminal/my-container"
+}
+```
+
 ---
 
 ## Web 终端
@@ -556,18 +559,21 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 
 ---
 
-## 容器健康状态
+## 容器状态
 
-后台每 **60 秒** 自动检查所有容器和节点的健康状态。用户也可通过 `POST /api/containers/{name}/refresh` 和 `POST /api/nodes/{id}/refresh` 手动触发即时检查。
+后台每 **60 秒** 自动检查所有容器和节点的状态。管理员可通过 `POST /api/admin/containers/{name}/refresh` 和 `POST /api/nodes/{id}/refresh` 手动触发即时检查。
 
-容器列表和详情接口返回 `health` 字段：
+容器列表和详情接口返回 `state` 字段：
 
 | 值 | 说明 |
 |------|------|
-| `healthy` | 运行中，LXD exec 响应正常 |
+| `running` | 运行中，LXD exec 响应正常 |
 | `unhealthy` | 连续 3 次 exec 检查失败 |
 | `lost` | 节点已删除或容器在 LXD 中不存在 |
 | `stopped` | 容器未运行 |
+| `creating` | 创建中，尚未就绪 |
+| `recovering` | 自动恢复中 |
+| `failed` | 自动恢复失败，需管理员介入 |
 
 ---
 
