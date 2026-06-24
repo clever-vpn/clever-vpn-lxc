@@ -102,85 +102,86 @@ var (
 	usedSSH   = map[int]bool{}
 	usedSvc   = map[int]bool{}
 
-	// Static IP pool per node (10.0.1.100 - 10.0.1.250)
-	usedIPs = map[string]map[int]bool{} // nodeID → {suffix: true}
-	ipMu    sync.Mutex
+	// Cursor-based allocation: next value to try, incremented on each alloc.
+	// Persisted to state file so they survive restarts.
+	sshCursor     int
+	svcCursor     int
+	ipCursor      = map[string]int{} // nodeID → next IP suffix
+	cursorMu      sync.Mutex
 )
 
 const ipBase = "10.0.1."
 const ipStart = 100
-const ipMax = 250
-
-func allocStaticIP(nodeID string) (string, error) {
-	ipMu.Lock()
-	defer ipMu.Unlock()
-	if usedIPs[nodeID] == nil {
-		usedIPs[nodeID] = map[int]bool{}
-	}
-	for i := ipStart; i <= ipMax; i++ {
-		if !usedIPs[nodeID][i] {
-			usedIPs[nodeID][i] = true
-			return fmt.Sprintf("%s%d", ipBase, i), nil
-		}
-	}
-	return "", fmt.Errorf("no free IP on node %s", nodeID)
-}
-
-func freeStaticIP(nodeID, ip string) {
-	if nodeID == "" || ip == "" || !strings.HasPrefix(ip, ipBase) {
-		return
-	}
-	ipMu.Lock()
-	defer ipMu.Unlock()
-	suffix, err := strconv.Atoi(strings.TrimPrefix(ip, ipBase))
-	if err == nil {
-		delete(usedIPs[nodeID], suffix)
-	}
-}
-
-// syncIPPoolFromLXD scans all LXD containers on all nodes and marks their
-// static IPs as used. This prevents re-assigning IPs that are still in use
-// by orphan containers (exist in LXD but not in the Manager registry).
-func syncIPPoolFromLXD() {
-	ipMu.Lock()
-	defer ipMu.Unlock()
-
-	for nodeID := range nodes {
-		cli, err := getNodeClientLocked(nodeID)
-		if err != nil {
-			continue
-		}
-		containers, err := cli.ListContainers(env("LXC_NAME_PREFIX", "user-"))
-		if err != nil {
-			continue
-		}
-		for _, c := range containers {
-			// Get the container's IP on the VPN network
-			vip, err := cli.InstanceIPv4(c.Name, 2*time.Second)
-			if err != nil || vip == "" || !strings.HasPrefix(vip, ipBase) {
-				continue
-			}
-			suffix, err := strconv.Atoi(strings.TrimPrefix(vip, ipBase))
-			if err != nil || suffix < ipStart || suffix > ipMax {
-				continue
-			}
-			if usedIPs[nodeID] == nil {
-				usedIPs[nodeID] = map[int]bool{}
-			}
-			if !usedIPs[nodeID][suffix] {
-				usedIPs[nodeID][suffix] = true
-				log.Printf("IP sync: %s (%s) marked as used on node %s", vip, c.Name, nodeID)
-			}
-		}
-	}
-}
+const ipMax   = 250
 
 const (
 	sshPortBase     = 22000
 	sshPortMax      = 22999
 	servicePortBase = 50000
 	servicePortMax  = 54999
+	cursorFile      = "cursors.json" // relative to data dir
 )
+
+// allocWithCursor returns the next free int in [base, max]. It advances cursor
+// and wraps around to base when max is exceeded. The inUse callback checks
+// whether a candidate is already taken (from instance records or port maps).
+// Panics if the pool is exhausted (shouldn't happen with realistic limits).
+func allocWithCursor(cursor *int, base, max int, inUse func(int) bool) int {
+	for range max - base + 1 {
+		v := *cursor
+		*cursor++
+		if *cursor > max {
+			*cursor = base
+		}
+		if !inUse(v) {
+			return v
+		}
+	}
+	panic(fmt.Sprintf("pool exhausted [%d, %d]", base, max))
+}
+
+// saveCursors persists the current cursor values to disk.
+func saveCursors() {
+	cursorMu.Lock()
+	defer cursorMu.Unlock()
+	data, _ := json.MarshalIndent(map[string]interface{}{
+		"sshCursor":  sshCursor,
+		"svcCursor":  svcCursor,
+		"ipCursor":   ipCursor,
+		"version":    1,
+	}, "", "  ")
+	os.WriteFile(filepathJoin(ensureDataDir(), cursorFile), data, 0600)
+}
+
+// loadCursors restores cursor values from disk.
+func loadCursors() {
+	path := filepathJoin(ensureDataDir(), cursorFile)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return // first run, start from defaults
+	}
+	var s struct {
+		Version  int            `json:"version"`
+		SSH      int            `json:"sshCursor"`
+		SVC      int            `json:"svcCursor"`
+		IPCursor map[string]int `json:"ipCursor"`
+	}
+	if err := json.Unmarshal(data, &s); err != nil {
+		log.Printf("WARNING: parse cursors: %v (starting fresh)", err)
+		return
+	}
+	cursorMu.Lock()
+	if s.SSH > 0 {
+		sshCursor = s.SSH
+	}
+	if s.SVC > 0 {
+		svcCursor = s.SVC
+	}
+	if s.IPCursor != nil {
+		ipCursor = s.IPCursor
+	}
+	cursorMu.Unlock()
+}
 
 func loadInstances() {
 	instFile = filepathJoin(ensureDataDir(), "instances.json")
@@ -216,21 +217,12 @@ func loadInstances() {
 		instances[r.Name] = r
 		usedSSH[r.SSHExtPort] = true
 		usedSvc[r.ServiceExtPort] = true
-		// Restore static IP tracking
-		if r.StaticIP != "" && r.Node != "" && strings.HasPrefix(r.StaticIP, ipBase) {
-			suffix, err := strconv.Atoi(strings.TrimPrefix(r.StaticIP, ipBase))
-			if err == nil {
-				if usedIPs[r.Node] == nil {
-					usedIPs[r.Node] = map[int]bool{}
-				}
-				usedIPs[r.Node][suffix] = true
-			}
-		}
 	}
 	log.Printf("Loaded %d instance(s)", len(instances))
 
-	// Sync IP pool from LXD to avoid re-assigning IPs still in use by orphan containers
-	syncIPPoolFromLXD()
+	// Rebuild cursors from existing instances so we continue where we left off
+	loadCursors()
+	rebuildCursorsFromInstances()
 }
 
 func saveInstances() {
@@ -247,14 +239,69 @@ func saveInstances() {
 	triggerSync("instances.json")
 }
 
-func allocPortLocked(base, max int, used map[int]bool) (int, error) {
-	for p := base; p <= max; p++ {
-		if !used[p] {
-			used[p] = true
-			return p, nil
+// rebuildCursorsFromInstances scans all instances and sets cursors to max(used) + 1.
+// This ensures we don't re-use recently freed values immediately.
+func rebuildCursorsFromInstances() {
+	maxSSH := 0
+	maxSvc := 0
+	for _, r := range instances {
+		if r.SSHExtPort > maxSSH {
+			maxSSH = r.SSHExtPort
+		}
+		if r.ServiceExtPort > maxSvc {
+			maxSvc = r.ServiceExtPort
+		}
+		if r.StaticIP != "" && strings.HasPrefix(r.StaticIP, ipBase) {
+			suffix, err := strconv.Atoi(strings.TrimPrefix(r.StaticIP, ipBase))
+			if err == nil && suffix >= ipStart && suffix <= ipMax {
+				if ipCursor[r.Node] < suffix+1 {
+					ipCursor[r.Node] = suffix + 1
+				}
+			}
 		}
 	}
-	return 0, fmt.Errorf("no free port %d-%d", base, max)
+	cursorMu.Lock()
+	if maxSSH >= sshPortBase && sshCursor <= maxSSH {
+		sshCursor = maxSSH + 1
+	}
+	if maxSvc >= servicePortBase && svcCursor <= maxSvc {
+		svcCursor = maxSvc + 1
+	}
+	cursorMu.Unlock()
+}
+
+// ipInUse checks whether an IP suffix is already assigned to any instance on the given node.
+func ipInUse(nodeID string, suffix int) bool {
+	instMu.Lock()
+	defer instMu.Unlock()
+	target := fmt.Sprintf("%s%d", ipBase, suffix)
+	for _, r := range instances {
+		if r.Node == nodeID && r.StaticIP == target {
+			return true
+		}
+	}
+	return false
+}
+
+func allocateSSHPort() int {
+	return allocWithCursor(&sshCursor, sshPortBase, sshPortMax, func(p int) bool { return usedSSH[p] })
+}
+
+func allocateSvcPort() int {
+	return allocWithCursor(&svcCursor, servicePortBase, servicePortMax, func(p int) bool { return usedSvc[p] })
+}
+
+func allocateStaticIP(nodeID string) string {
+	cursorMu.Lock()
+	if _, ok := ipCursor[nodeID]; !ok {
+		ipCursor[nodeID] = ipStart
+	}
+	// Use a local copy so allocWithCursor advances the map entry
+	c := ipCursor[nodeID]
+	suffix := allocWithCursor(&c, ipStart, ipMax, func(s int) bool { return ipInUse(nodeID, s) })
+	ipCursor[nodeID] = c
+	cursorMu.Unlock()
+	return fmt.Sprintf("%s%d", ipBase, suffix)
 }
 
 func registerInstance(name string, rec *InstanceRecord) error {
@@ -264,24 +311,29 @@ func registerInstance(name string, rec *InstanceRecord) error {
 	if _, exists := instances[name]; exists {
 		return fmt.Errorf("instance %s already registered", name)
 	}
-	ssh, err := allocPortLocked(sshPortBase, sshPortMax, usedSSH)
+	ssh, err := func() (int, error) {
+		cursorMu.Lock()
+		defer cursorMu.Unlock()
+		p := allocateSSHPort()
+		usedSSH[p] = true
+		return p, nil
+	}()
 	if err != nil {
 		return err
 	}
-	svc, err := allocPortLocked(servicePortBase, servicePortMax, usedSvc)
+	svc, err := func() (int, error) {
+		cursorMu.Lock()
+		defer cursorMu.Unlock()
+		p := allocateSvcPort()
+		usedSvc[p] = true
+		return p, nil
+	}()
 	if err != nil {
-		usedSSH[ssh] = false
+		delete(usedSSH, ssh)
 		return err
 	}
-	// Allocate static IP from node's pool
 	if rec.Node != "" && rec.StaticIP == "" {
-		ip, err := allocStaticIP(rec.Node)
-		if err != nil {
-			usedSSH[ssh] = false
-			usedSvc[svc] = false
-			return fmt.Errorf("alloc IP: %w", err)
-		}
-		rec.StaticIP = ip
+		rec.StaticIP = allocateStaticIP(rec.Node)
 	}
 
 	rec.SSHExtPort = ssh
@@ -289,6 +341,7 @@ func registerInstance(name string, rec *InstanceRecord) error {
 	rec.Created = time.Now().UTC()
 	instances[name] = rec
 	saveInstances()
+	saveCursors()
 	return nil
 }
 
@@ -297,9 +350,9 @@ func unregisterInstance(name string) {
 	defer instMu.Unlock()
 
 	if r, ok := instances[name]; ok {
+		// Recycle ports (user-facing), but not IP (internal, never recycled).
 		delete(usedSSH, r.SSHExtPort)
 		delete(usedSvc, r.ServiceExtPort)
-		freeStaticIP(r.Node, r.StaticIP)
 		delete(instances, name)
 		saveInstances()
 	}

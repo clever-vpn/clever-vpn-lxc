@@ -20,19 +20,19 @@ import (
 // ==================== Node Registry ====================
 
 type NodeRecord struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Region      string `json:"region"`
-	URL         string `json:"url"`
-	Network     string `json:"network"`
-	SSHHost     string `json:"sshHost"`
-	SSHPort     int    `json:"sshPort"`
-	SSHPassword string `json:"sshPassword"`
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Region        string `json:"region"`
+	URL           string `json:"url"`
+	Network       string `json:"network"`
+	SSHHost       string `json:"sshHost"`
+	SSHPort       int    `json:"sshPort"`
+	SSHPassword   string `json:"sshPassword"`
 	Image         string `json:"image"`
-	PoolSize      string `json:"poolSize"`      // btrfs pool size (e.g. "10", "15GiB")
-	Status        string `json:"status"`         // "active" | "degraded" | "offline" | "rebuilding"
+	PoolSize      string `json:"poolSize"` // btrfs pool size (e.g. "10", "15GiB")
+	Status        string `json:"status"`   // "active" | "degraded" | "offline" | "rebuilding"
 	StatusReason  string `json:"statusReason,omitempty"`
-	MaxContainers int    `json:"maxContainers"`  // 0 = unlimited
+	MaxContainers int    `json:"maxContainers"` // 0 = unlimited
 }
 
 var (
@@ -268,6 +268,10 @@ func rebuildNode(nodeID string) error {
 	// Wait for LXD
 	sshExec(client, "for i in $(seq 1 60); do lxc storage list &>/dev/null 2>&1 && break; sleep 2; done")
 
+	// Clear all containers and DNAT rules on the node
+	sshExec(client, "lxc list --format csv -c n 2>/dev/null | while read c; do lxc delete \"$c\" --force 2>/dev/null; done")
+	sshExec(client, "iptables -t nat -F PREROUTING 2>/dev/null; iptables -t nat -F POSTROUTING 2>/dev/null")
+
 	// Re-init LXD (idempotent)
 	setupCmd := fmt.Sprintf("STORAGE_POOL_SIZE=%s bash -c 'lxc profile device remove default root 2>/dev/null; lxc storage delete default 2>/dev/null; lxc network delete lxdbr0 2>/dev/null; rm -f /var/snap/lxd/common/lxd/disks/default.img; lxd init --auto --storage-backend=btrfs --storage-create-loop=%s'", n.PoolSize, n.PoolSize)
 	out, err := sshExec(client, setupCmd)
@@ -289,24 +293,153 @@ func rebuildNode(nodeID string) error {
 	sshExec(client, "lxc config set core.https_address :8443 2>/dev/null || true")
 	sshExec(client, "lxc config trust add /tmp/manager-client.crt --type=client --restricted=false 2>/dev/null || true && rm -f /tmp/manager-client.crt")
 
-	// Mark all containers on this node as lost
+	// Re-assign all instances that belong to this node (lost containers)
 	instMu.Lock()
 	for _, rec := range instances {
-		if rec.Node == nodeID {
-			rec.Node = ""
-			rec.Health = healthLost
-			rec.HealthReason = "node rebuild"
+		if rec.Node == "" && rec.Health == healthLost && rec.NodePublicIP == n.SSHHost {
+			rec.Node = nodeID
+			rec.Health = "creating"
 		}
 	}
 	instMu.Unlock()
 	saveInstances()
 
-	// Recover lost containers
-	go recoverOrphanContainersByPublicIP(nodeID, n.SSHHost)
+	// Full rebuild: recreate all containers for this node from instances.json
+	go recreateAllContainersOnNode(nodeID)
 
 	setNodeStatus(nodeID, "active", "")
-	log.Printf("Node %s rebuild initiated, recovery in progress", n.Name)
+	log.Printf("Node %s rebuild initiated, full container recreation in progress", n.Name)
 	return nil
+}
+
+// recreateAllContainersOnNode rebuilds every instance assigned to a node from scratch.
+func recreateAllContainersOnNode(nodeID string) {
+	cli, err := getNodeClient(nodeID)
+	if err != nil {
+		log.Printf("Rebuild: cannot connect to node %s: %v", nodeID, err)
+		return
+	}
+
+	img := env("LXC_BASE_IMAGE", "clever-vpn-base")
+	net := env("LXC_NETWORK", "vpnbr0")
+
+	instMu.Lock()
+	var toRebuild []*InstanceRecord
+	for _, rec := range instances {
+		if rec.Node == nodeID && (rec.Health == "creating" || rec.Health == healthLost) {
+			toRebuild = append(toRebuild, rec)
+			// Pre-claim ports to avoid conflicts
+			usedSSH[rec.SSHExtPort] = true
+			usedSvc[rec.ServiceExtPort] = true
+		}
+	}
+	instMu.Unlock()
+
+	if len(toRebuild) == 0 {
+		log.Printf("Rebuild: no containers to recreate on node %s", nodeID)
+		return
+	}
+
+	log.Printf("Rebuild: recreating %d container(s) on node %s", len(toRebuild), nodeID)
+
+	for _, rec := range toRebuild {
+		log.Printf("Rebuild: creating %s (cpu=%d mem=%dMB disk=%dGB ip=%s ssh=%d svc=%d)",
+			rec.Name, rec.CPU, rec.Mem, rec.Disk, rec.StaticIP, rec.SSHExtPort, rec.ServiceExtPort)
+
+		cloudConfig := mergeUserData(rec.UserData, rec.Name, bootstrapEnv(rec.Name, nodeID, rec.CPU, rec.Mem, rec.Disk,
+			PortInfo{SSH: rec.SSHExtPort, Service: rec.ServiceExtPort}), rec.Password)
+		if err := cli.CreateContainer(rec.Name, img, net, rec.StaticIP, rec.CPU, rec.Mem, rec.Disk,
+			map[string]string{"cloud-init.user-data": cloudConfig}); err != nil {
+			log.Printf("Rebuild: create %s: %v", rec.Name, err)
+			continue
+		}
+		if err := cli.StartContainer(rec.Name); err != nil {
+			log.Printf("Rebuild: start %s: %v", rec.Name, err)
+			continue
+		}
+
+		go func(r *InstanceRecord) {
+			if err := addPortForward(nodeID, r.SSHExtPort, r.StaticIP, 22); err != nil {
+				log.Printf("Rebuild %s: forward ssh: %v", r.Name, err)
+				return
+			}
+			if err := addPortForward(nodeID, r.ServiceExtPort, r.StaticIP, r.ServicePort); err != nil {
+				log.Printf("Rebuild %s: forward svc: %v", r.Name, err)
+				return
+			}
+			r.Health = "healthy"
+			saveInstances()
+			log.Printf("Rebuild: %s restored (ssh:%d→%s:22 svc:%d→%s:%d)",
+				r.Name, r.SSHExtPort, r.StaticIP, r.ServiceExtPort, r.StaticIP, r.ServicePort)
+		}(rec)
+	}
+}
+
+// recoverOrphanContainersByPublicIP is called after a node is added to
+// recreate any lost containers that previously belonged to the same IP.
+func recoverOrphanContainersByPublicIP(nodeID string, sshHost string) {
+	cli, err := getNodeClient(nodeID)
+	if err != nil {
+		log.Printf("Recovery: cannot connect to node %s: %v", nodeID, err)
+		return
+	}
+
+	instMu.Lock()
+	var toRecover []*InstanceRecord
+	for _, rec := range instances {
+		if rec.Node == "" && rec.Health == healthLost && rec.NodePublicIP == sshHost && rec.NodePublicIP != "" {
+			toRecover = append(toRecover, rec)
+			// Pre-claim ports
+			usedSSH[rec.SSHExtPort] = true
+			usedSvc[rec.ServiceExtPort] = true
+		}
+	}
+	instMu.Unlock()
+
+	if len(toRecover) == 0 {
+		return
+	}
+
+	log.Printf("Recovery: found %d lost container(s) for node %s (ip=%s)", len(toRecover), nodeID, sshHost)
+
+	img := env("LXC_BASE_IMAGE", "clever-vpn-base")
+	net := env("LXC_NETWORK", "vpnbr0")
+
+	for _, rec := range toRecover {
+		log.Printf("Recovery: rebuilding %s (cpu=%d mem=%dMB disk=%dGB ssh=%d svc=%d ip=%s)",
+			rec.Name, rec.CPU, rec.Mem, rec.Disk, rec.SSHExtPort, rec.ServiceExtPort, rec.StaticIP)
+
+		rec.Node = nodeID
+		rec.Health = "creating"
+		saveInstances()
+
+		cloudConfig := mergeUserData(rec.UserData, rec.Name, bootstrapEnv(rec.Name, nodeID, rec.CPU, rec.Mem, rec.Disk,
+			PortInfo{SSH: rec.SSHExtPort, Service: rec.ServiceExtPort}), rec.Password)
+		if err := cli.CreateContainer(rec.Name, img, net, rec.StaticIP, rec.CPU, rec.Mem, rec.Disk,
+			map[string]string{"cloud-init.user-data": cloudConfig}); err != nil {
+			log.Printf("Recovery: failed to create %s: %v", rec.Name, err)
+			continue
+		}
+		if err := cli.StartContainer(rec.Name); err != nil {
+			log.Printf("Recovery: failed to start %s: %v", rec.Name, err)
+			continue
+		}
+
+		go func(r *InstanceRecord) {
+			if err := addPortForward(nodeID, r.SSHExtPort, r.StaticIP, 22); err != nil {
+				log.Printf("Recovery %s: forward ssh: %v", r.Name, err)
+				return
+			}
+			if err := addPortForward(nodeID, r.ServiceExtPort, r.StaticIP, r.ServicePort); err != nil {
+				log.Printf("Recovery %s: forward svc: %v", r.Name, err)
+				return
+			}
+			r.Health = "healthy"
+			saveInstances()
+			log.Printf("Recovery: %s restored (ssh:%d→%s:22 svc:%d→%s:%d)",
+				r.Name, r.SSHExtPort, r.StaticIP, r.ServiceExtPort, r.StaticIP, r.ServicePort)
+		}(rec)
+	}
 }
 
 // listNodesSlice returns all nodes as a slice (for API responses).
@@ -410,82 +543,6 @@ func cleanupOrphanContainers(nodeID string) {
 				log.Printf("Orphan cleanup: failed to delete %s: %v", c.Name, err)
 			}
 		}
-	}
-}
-
-// recoverOrphanContainersByPublicIP finds lost containers (Node="", health="lost")
-// whose NodePublicIP matches the new node's SSHHost, and re-creates them.
-func recoverOrphanContainersByPublicIP(nodeID string, sshHost string) {
-	cli, err := getNodeClient(nodeID)
-	if err != nil {
-		log.Printf("Recovery: cannot connect to node %s: %v", nodeID, err)
-		return
-	}
-
-	instMu.Lock()
-	var toRecover []*InstanceRecord
-	for _, rec := range instances {
-		if rec.Node == "" && rec.Health == "lost" && rec.NodePublicIP == sshHost && rec.NodePublicIP != "" {
-			toRecover = append(toRecover, rec)
-			// Pre-claim the ports and IP to avoid conflicts during recovery
-			usedSSH[rec.SSHExtPort] = true
-			usedSvc[rec.ServiceExtPort] = true
-			if usedIPs[nodeID] == nil {
-				usedIPs[nodeID] = map[int]bool{}
-			}
-			suffix := parseIPLastOctet(rec.StaticIP)
-			if suffix > 0 {
-				usedIPs[nodeID][suffix] = true
-			}
-		}
-	}
-	instMu.Unlock()
-
-	if len(toRecover) == 0 {
-		return
-	}
-
-	log.Printf("Recovery: found %d lost container(s) for node %s (ip=%s)", len(toRecover), nodeID, sshHost)
-
-	img := env("LXC_BASE_IMAGE", "clever-vpn-base")
-	net := env("LXC_NETWORK", "vpnbr0")
-
-	for _, rec := range toRecover {
-		log.Printf("Recovery: rebuilding %s (cpu=%d mem=%dMB disk=%dGB ssh=%d svc=%d ip=%s)",
-			rec.Name, rec.CPU, rec.Mem, rec.Disk, rec.SSHExtPort, rec.ServiceExtPort, rec.StaticIP)
-
-		// Re-register with new node
-		rec.Node = nodeID
-		rec.Health = "creating"
-		saveInstances()
-
-		cloudConfig := mergeUserData(rec.UserData, rec.Name, bootstrapEnv(rec.Name, nodeID, rec.CPU, rec.Mem, rec.Disk,
-			PortInfo{SSH: rec.SSHExtPort, Service: rec.ServiceExtPort}), rec.Password)
-		if err := cli.CreateContainer(rec.Name, img, net, rec.StaticIP, rec.CPU, rec.Mem, rec.Disk,
-			map[string]string{"cloud-init.user-data": cloudConfig}); err != nil {
-			log.Printf("Recovery: failed to create %s: %v", rec.Name, err)
-			continue
-		}
-		if err := cli.StartContainer(rec.Name); err != nil {
-			log.Printf("Recovery: failed to start %s: %v", rec.Name, err)
-			continue
-		}
-
-		// Restore port forwarding
-		go func(r *InstanceRecord) {
-			if err := addPortForward(nodeID, r.SSHExtPort, r.StaticIP, 22); err != nil {
-				log.Printf("Recovery %s: forward ssh: %v", r.Name, err)
-				return
-			}
-			if err := addPortForward(nodeID, r.ServiceExtPort, r.StaticIP, r.ServicePort); err != nil {
-				log.Printf("Recovery %s: forward svc: %v", r.Name, err)
-				return
-			}
-			r.Health = "healthy"
-			saveInstances()
-			log.Printf("Recovery: %s restored (ssh:%d→%s:22 svc:%d→%s:%d)",
-				r.Name, r.SSHExtPort, r.StaticIP, r.ServiceExtPort, r.StaticIP, r.ServicePort)
-		}(rec)
 	}
 }
 
