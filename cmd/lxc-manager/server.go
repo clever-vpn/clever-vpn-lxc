@@ -1358,13 +1358,13 @@ func handleAdminResizeContainer(w http.ResponseWriter, r *http.Request) {
 
 func handleNodeAdd(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name          string      `json:"name"`
-		Region        string      `json:"region"`
-		SSHHost       string      `json:"sshHost"`
-		SSHPort       flexInt     `json:"sshPort"`
-		SSHPassword   string      `json:"sshPassword"`
-		PoolSize      flexString  `json:"poolSize"`
-		MaxContainers flexInt     `json:"maxContainers"`
+		Name          string     `json:"name"`
+		Region        string     `json:"region"`
+		SSHHost       string     `json:"sshHost"`
+		SSHPort       flexInt    `json:"sshPort"`
+		SSHPassword   string     `json:"sshPassword"`
+		PoolSize      flexString `json:"poolSize"`
+		MaxContainers flexInt    `json:"maxContainers"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		log.Printf("Node add: invalid body: %v", err)
@@ -1379,15 +1379,21 @@ func handleNodeAdd(w http.ResponseWriter, r *http.Request) {
 	if req.SSHPort == 0 {
 		req.SSHPort = 22
 	}
-
-	rec, err := provisionNode(req.Name, req.Region, req.SSHHost, int(req.SSHPort), req.SSHPassword, string(req.PoolSize))
-	if err != nil {
-		log.Printf("Node add: provision failed: %v", err)
-		jsonError(w, fmt.Sprintf("provision: %v", err), 500)
-		return
+	ps := string(req.PoolSize)
+	if ps == "" {
+		ps = cfg.StoragePoolSize
 	}
-	if req.MaxContainers > 0 {
-		rec.MaxContainers = int(req.MaxContainers)
+
+	// Register node immediately with "creating" status
+	rec := &NodeRecord{
+		Name:          req.Name,
+		Region:        req.Region,
+		SSHHost:       req.SSHHost,
+		SSHPort:       int(req.SSHPort),
+		SSHPassword:   req.SSHPassword,
+		PoolSize:      ps,
+		Status:        "creating",
+		MaxContainers: int(req.MaxContainers),
 	}
 
 	if err := addNode(rec); err != nil {
@@ -1395,19 +1401,36 @@ func handleNodeAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Clean up orphan containers on this node (exist in LXD but not in our registry)
-	go cleanupOrphanContainers(rec.ID)
+	// Provision asynchronously (SSH + setup takes time)
+	go func() {
+		provisioned, err := provisionNode(req.Name, req.Region, req.SSHHost, int(req.SSHPort), req.SSHPassword, ps)
+		nodesMu.Lock()
+		if n, ok := nodes[rec.ID]; ok {
+			if err != nil {
+				n.Status = "degraded"
+				n.StatusReason = fmt.Sprintf("provision: %v", err)
+				log.Printf("Node %s provision failed: %v", rec.ID, err)
+			} else {
+				n.URL = provisioned.URL
+				n.Network = provisioned.Network
+				n.Image = provisioned.Image
+				n.Status = "active"
+				log.Printf("Node %s ready: %s (region=%s)", rec.ID, n.URL, rec.Region)
+				// Clean up orphan containers and recover lost ones
+				go cleanupOrphanContainers(rec.ID)
+				go recoverOrphanContainersByPublicIP(rec.ID, req.SSHHost)
+			}
+		}
+		nodesMu.Unlock()
+		saveNodes()
+	}()
 
-	// Recover lost containers that belonged to a node with the same public IP
-	go recoverOrphanContainersByPublicIP(rec.ID, req.SSHHost)
-
-	log.Printf("Node %s ready: %s (region=%s)", rec.Name, rec.URL, rec.Region)
+	log.Printf("Node %s registered, provisioning in background", rec.ID)
 	jsonOK(w, map[string]interface{}{
-		"status": "ready",
+		"status": "creating",
 		"id":     rec.ID,
 		"name":   rec.Name,
 		"region": rec.Region,
-		"url":    rec.URL,
 	})
 }
 
