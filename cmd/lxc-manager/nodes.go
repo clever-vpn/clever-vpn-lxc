@@ -284,12 +284,16 @@ func rebuildNode(nodeID string) error {
 	sshExec(client, "lxc list --format csv -c n 2>/dev/null | while read c; do lxc delete \"$c\" --force 2>/dev/null; done")
 	sshExec(client, "iptables -t nat -F PREROUTING 2>/dev/null; iptables -t nat -F POSTROUTING 2>/dev/null")
 
-	// Re-init LXD (idempotent)
-	setupCmd := fmt.Sprintf("STORAGE_POOL_SIZE=%s bash -c 'lxc profile device remove default root 2>/dev/null; lxc storage delete default 2>/dev/null; lxc network delete lxdbr0 2>/dev/null; rm -f /var/snap/lxd/common/lxd/disks/default.img; lxd init --auto --storage-backend=btrfs --storage-create-loop=%s'", n.PoolSize, n.PoolSize)
+	// Upload and run full node-setup.sh (handles idempotent LXD init, network, firewall, base image)
+	if err := scpBytes(client, "/tmp/node-setup.sh", []byte(embeddedNodeSetup), "0755"); err != nil {
+		setNodeStatus(nodeID, "degraded", fmt.Sprintf("upload setup script: %v", err))
+		return fmt.Errorf("upload setup script: %w", err)
+	}
+	setupCmd := fmt.Sprintf("STORAGE_POOL_SIZE=%s bash /tmp/node-setup.sh && rm -f /tmp/node-setup.sh", n.PoolSize)
 	out, err := sshExec(client, setupCmd)
 	if err != nil {
-		setNodeStatus(nodeID, "degraded", fmt.Sprintf("lxd init: %v", err))
-		return fmt.Errorf("lxd init: %w\n%s", err, out)
+		setNodeStatus(nodeID, "degraded", fmt.Sprintf("setup script: %v", err))
+		return fmt.Errorf("setup script: %w\n%s", err, out)
 	}
 
 	// Upload and trust cert
