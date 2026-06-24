@@ -305,12 +305,14 @@ func rebuildNode(nodeID string) error {
 	sshExec(client, "lxc config set core.https_address :8443 2>/dev/null || true")
 	sshExec(client, "lxc config trust add /tmp/manager-client.crt --type=client --restricted=false 2>/dev/null || true && rm -f /tmp/manager-client.crt")
 
-	// Re-assign all instances that belong to this node (lost containers)
+	// Re-assign all instances that belong to this node
 	instMu.Lock()
+	hasContainers := false
 	for _, rec := range instances {
-		if rec.Node == "" && rec.Health == healthLost && rec.NodePublicIP == n.SSHHost {
+		if rec.NodePublicIP == n.SSHHost && rec.NodePublicIP != "" {
 			rec.Node = nodeID
 			rec.Health = "creating"
+			hasContainers = true
 		}
 	}
 	instMu.Unlock()
@@ -320,28 +322,30 @@ func rebuildNode(nodeID string) error {
 	removeNodeClient(nodeID)
 
 	// Full rebuild: recreate all containers for this node in background.
-	// Status stays "rebuilding" until the goroutine finishes.
 	go func() {
 		recreateAllContainersOnNode(nodeID)
-		// After rebuild, set status to active (or degraded if something went wrong)
 		nodesMu.Lock()
 		if n, ok := nodes[nodeID]; ok {
-			// Check if any containers are still lost/creating → keep degraded
-			instMu.Lock()
-			allHealthy := true
-			for _, rec := range instances {
-				if rec.Node == nodeID && (rec.Health == healthLost || rec.Health == "creating") {
-					allHealthy = false
-					break
-				}
-			}
-			instMu.Unlock()
-			if allHealthy {
+			if !hasContainers {
 				n.Status = "active"
 				n.StatusReason = ""
 			} else {
-				n.Status = "degraded"
-				n.StatusReason = "some containers failed to recover"
+				instMu.Lock()
+				allHealthy := true
+				for _, rec := range instances {
+					if rec.Node == nodeID && (rec.Health == healthLost || rec.Health == "creating") {
+						allHealthy = false
+						break
+					}
+				}
+				instMu.Unlock()
+				if allHealthy {
+					n.Status = "active"
+					n.StatusReason = ""
+				} else {
+					n.Status = "degraded"
+					n.StatusReason = "some containers failed to recover"
+				}
 			}
 		}
 		nodesMu.Unlock()
