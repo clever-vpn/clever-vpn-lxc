@@ -630,7 +630,7 @@ func handleList(w http.ResponseWriter, r *http.Request) {
 		ownedSet[n] = true
 	}
 
-	var result []map[string]interface{}
+	result := make([]map[string]interface{}, 0)
 	for _, c := range all {
 		if ownedSet[c.Name] {
 			data, _ := json.Marshal(c)
@@ -677,24 +677,29 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	c, err := clientForInstance(name).GetContainer(name)
-	if err != nil {
-		jsonError(w, fmt.Sprintf("get: %v", err), 404)
-		return
+	// Build response from instance record + optional LXD state
+	resp := map[string]interface{}{
+		"name":        rec.Name,
+		"health":      rec.Health,
+		"region":      rec.Region,
+		"nodeID":      rec.Node,
+		"publicIP":    getNodePublicIP(rec.Node),
+		"terminalUrl": fmt.Sprintf("https://%s/terminal/%s", cfg.Domain, name),
+		"status":      "unknown",
 	}
-
-	// Wrap with terminalUrl
-	data, _ := json.Marshal(c)
-	var resp map[string]interface{}
-	json.Unmarshal(data, &resp)
-	resp["terminalUrl"] = fmt.Sprintf("https://%s/terminal/%s", cfg.Domain, name)
-	resp["health"] = rec.Health
 	if rec.HealthReason != "" {
 		resp["healthReason"] = rec.HealthReason
 	}
-	resp["region"] = rec.Region
-	resp["nodeID"] = rec.Node
-	resp["publicIP"] = getNodePublicIP(rec.Node)
+
+	cli := clientForInstance(name)
+	if cli != nil {
+		c, err := cli.GetContainer(name)
+		if err == nil {
+			resp["status"] = c.Status
+			resp["state"] = c.State
+		}
+	}
+
 	jsonOK(w, resp)
 }
 

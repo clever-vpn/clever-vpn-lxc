@@ -106,7 +106,7 @@ func deleteRegion(id string) error {
 func listRegionsSlice() []RegionInfo {
 	regionsMu.Lock()
 	defer regionsMu.Unlock()
-	var result []RegionInfo
+	result := make([]RegionInfo, 0, len(regions))
 	for _, r := range regions {
 		result = append(result, RegionInfo{
 			ID:        r.ID,

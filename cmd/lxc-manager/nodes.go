@@ -314,7 +314,7 @@ func listNodesSlice() []*NodeRecord {
 	nodesMu.Lock()
 	defer nodesMu.Unlock()
 
-	var result []*NodeRecord
+	result := make([]*NodeRecord, 0, len(nodes))
 	for _, rec := range nodes {
 		result = append(result, rec)
 	}

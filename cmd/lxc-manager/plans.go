@@ -116,7 +116,7 @@ func deletePlan(id string) error {
 func listPlansSlice(region string) []PlanInfo {
 	plansMu.Lock()
 	defer plansMu.Unlock()
-	var result []PlanInfo
+	result := make([]PlanInfo, 0, len(plans))
 	for _, p := range plans {
 		if region != "" && !containsStr(p.Locations, region) {
 			continue
