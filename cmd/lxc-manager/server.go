@@ -96,6 +96,25 @@ func (f *flexInt) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// flexString unmarshals both JSON strings ("10") and numbers (10).
+type flexString string
+
+func (f *flexString) UnmarshalJSON(b []byte) error {
+	// Try string first
+	var s string
+	if err := json.Unmarshal(b, &s); err == nil {
+		*f = flexString(s)
+		return nil
+	}
+	// Try number, convert to string
+	var n float64
+	if err := json.Unmarshal(b, &n); err != nil {
+		return fmt.Errorf("flexString: expected string or number, got %s", string(b))
+	}
+	*f = flexString(strconv.FormatFloat(n, 'f', -1, 64))
+	return nil
+}
+
 // ==================== Instance Registry ====================
 
 type InstanceRecord struct {
@@ -1339,7 +1358,7 @@ func handleNodeAdd(w http.ResponseWriter, r *http.Request) {
 		SSHHost       string      `json:"sshHost"`
 		SSHPort       flexInt     `json:"sshPort"`
 		SSHPassword   string      `json:"sshPassword"`
-		PoolSize      string      `json:"poolSize"`
+		PoolSize      flexString  `json:"poolSize"`
 		MaxContainers flexInt     `json:"maxContainers"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1356,7 +1375,7 @@ func handleNodeAdd(w http.ResponseWriter, r *http.Request) {
 		req.SSHPort = 22
 	}
 
-	rec, err := provisionNode(req.Name, req.Region, req.SSHHost, int(req.SSHPort), req.SSHPassword, req.PoolSize)
+	rec, err := provisionNode(req.Name, req.Region, req.SSHHost, int(req.SSHPort), req.SSHPassword, string(req.PoolSize))
 	if err != nil {
 		log.Printf("Node add: provision failed: %v", err)
 		jsonError(w, fmt.Sprintf("provision: %v", err), 500)
