@@ -305,16 +305,15 @@ func allocateStaticIP(nodeID string) string {
 }
 
 func registerInstance(name string, rec *InstanceRecord) error {
-	instMu.Lock()
-	defer instMu.Unlock()
-
-	if _, exists := instances[name]; exists {
-		return fmt.Errorf("instance %s already registered", name)
-	}
+	// Allocate ports and IP BEFORE locking instMu to avoid
+	// instMu → cursorMu → instMu deadlock via ipInUse.
 	ssh, err := func() (int, error) {
 		cursorMu.Lock()
 		defer cursorMu.Unlock()
 		p := allocateSSHPort()
+		if p == 0 {
+			return 0, fmt.Errorf("no free SSH port")
+		}
 		usedSSH[p] = true
 		return p, nil
 	}()
@@ -325,6 +324,9 @@ func registerInstance(name string, rec *InstanceRecord) error {
 		cursorMu.Lock()
 		defer cursorMu.Unlock()
 		p := allocateSvcPort()
+		if p == 0 {
+			return 0, fmt.Errorf("no free service port")
+		}
 		usedSvc[p] = true
 		return p, nil
 	}()
@@ -334,6 +336,16 @@ func registerInstance(name string, rec *InstanceRecord) error {
 	}
 	if rec.Node != "" && rec.StaticIP == "" {
 		rec.StaticIP = allocateStaticIP(rec.Node)
+	}
+
+	instMu.Lock()
+	defer instMu.Unlock()
+
+	if _, exists := instances[name]; exists {
+		// Rollback ports if name collision
+		delete(usedSSH, ssh)
+		delete(usedSvc, svc)
+		return fmt.Errorf("instance %s already registered", name)
 	}
 
 	rec.SSHExtPort = ssh
