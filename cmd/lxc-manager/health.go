@@ -124,6 +124,7 @@ func checkContainer(name string) {
 	}
 
 	// Node is active — do full per-container health check
+	nodeID := rec.Node
 	cli := clientForInstance(name)
 	if cli == nil {
 		setHealth(name, healthLost, "no LXD client for active node")
@@ -132,7 +133,14 @@ func checkContainer(name string) {
 
 	c, err := cli.GetContainer(name)
 	if err != nil {
-		setHealth(name, healthLost, "not found on node")
+		// Container missing on active node — auto-recover
+		instMu.Lock()
+		rec, exists := instances[name]
+		instMu.Unlock()
+		if exists && rec.Node == nodeID {
+			setHealth(name, "recovering", "not found on node, attempting auto-recovery")
+			go recoverMissingContainer(rec)
+		}
 		return
 	}
 
@@ -188,4 +196,48 @@ func setHealth(name, status, reason string) {
 	if prev != status {
 		log.Printf("Health: %s → %s (reason: %s)", name, status, reason)
 	}
+}
+
+// recoverMissingContainer recreates a container that was lost from LXD
+// but whose node is still active. Uses the instance record to rebuild.
+func recoverMissingContainer(rec *InstanceRecord) {
+	cli, err := getNodeClient(rec.Node)
+	if err != nil {
+		log.Printf("Auto-recovery %s: cannot connect to node %s: %v", rec.Name, rec.Node, err)
+		setHealth(rec.Name, healthLost, fmt.Sprintf("auto-recovery failed: %v", err))
+		return
+	}
+
+	log.Printf("Auto-recovery: recreating %s on node %s (cpu=%d mem=%dMB disk=%dGB ip=%s)",
+		rec.Name, rec.Node, rec.CPU, rec.Mem, rec.Disk, rec.StaticIP)
+
+	img := env("LXC_BASE_IMAGE", "clever-vpn-base")
+	net := env("LXC_NETWORK", "vpnbr0")
+
+	cloudConfig := mergeUserData(rec.UserData, rec.Name, bootstrapEnv(rec.Name, rec.Node, rec.CPU, rec.Mem, rec.Disk,
+		PortInfo{SSH: rec.SSHExtPort, Service: rec.ServiceExtPort}), rec.Password)
+
+	if err := cli.CreateContainer(rec.Name, img, net, rec.StaticIP, rec.CPU, rec.Mem, rec.Disk,
+		map[string]string{"cloud-init.user-data": cloudConfig}); err != nil {
+		log.Printf("Auto-recovery %s: create failed: %v", rec.Name, err)
+		setHealth(rec.Name, healthLost, fmt.Sprintf("auto-recovery create failed: %v", err))
+		return
+	}
+
+	if err := cli.StartContainer(rec.Name); err != nil {
+		log.Printf("Auto-recovery %s: start failed: %v", rec.Name, err)
+		setHealth(rec.Name, healthLost, fmt.Sprintf("auto-recovery start failed: %v", err))
+		return
+	}
+
+	go func() {
+		if err := addPortForward(rec.Node, rec.SSHExtPort, rec.StaticIP, 22); err != nil {
+			log.Printf("Auto-recovery %s: forward ssh: %v", rec.Name, err)
+		}
+		if err := addPortForward(rec.Node, rec.ServiceExtPort, rec.StaticIP, rec.ServicePort); err != nil {
+			log.Printf("Auto-recovery %s: forward svc: %v", rec.Name, err)
+		}
+		setHealth(rec.Name, healthHealthy, "")
+		log.Printf("Auto-recovery: %s restored successfully", rec.Name)
+	}()
 }
