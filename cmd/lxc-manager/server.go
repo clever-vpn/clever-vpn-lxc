@@ -704,17 +704,13 @@ func handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rec, ports, err := createContainerCore(userID, req.UserData, req.CPU, req.Mem, req.Disk, req.ServicePort, req.Region, req.PlanID, req.Label)
+	rec, _, err := createContainerCore(userID, req.UserData, req.CPU, req.Mem, req.Disk, req.ServicePort, req.Region, req.PlanID, req.Label)
 	if err != nil {
 		jsonError(w, err.Error(), 400)
 		return
 	}
 
-	resp := CreateResp{Status: "creating", ID: rec.Name, Ports: ports, CPU: rec.CPU, Mem: rec.Mem, Disk: rec.Disk, NodeID: rec.Node, Region: rec.Region, PublicIP: getNodePublicIP(rec.Node)}
-	if rec.Password != "" {
-		resp.Password = rec.Password
-	}
-	jsonOK(w, resp)
+	jsonOK(w, containerResponse(rec))
 }
 
 // getNodePublicIP returns the SSH host (public IP) of the node, or empty if no node.
@@ -754,72 +750,23 @@ func handleList(w http.ResponseWriter, r *http.Request) {
 	filterLabel := r.URL.Query().Get("label")
 
 	instMu.Lock()
-	var mine []string
-	for name, rec := range instances {
-		if rec.UserID == userID {
-			if filterLabel != "" && rec.Label != filterLabel {
-				continue
-			}
-			mine = append(mine, name)
+	var recs []*InstanceRecord
+	for _, rec := range instances {
+		if rec.UserID != userID {
+			continue
 		}
+		if filterLabel != "" && rec.Label != filterLabel {
+			continue
+		}
+		recs = append(recs, rec)
 	}
 	instMu.Unlock()
 
-	if len(mine) == 0 {
-		jsonOK(w, []map[string]string{})
-		return
+	result := make([]map[string]interface{}, 0, len(recs))
+	for _, rec := range recs {
+		result = append(result, containerResponse(rec))
 	}
 
-	// List LXD containers, filter by owned names
-	if len(nodes) == 0 {
-		jsonOK(w, []map[string]string{})
-		return
-	}
-	// Use any available node client
-	cli, err := getDefaultClient()
-	if err != nil {
-		jsonOK(w, []map[string]string{})
-		return
-	}
-	all, _ := cli.ListContainers(env("LXC_NAME_PREFIX", "user-"))
-
-	ownedSet := map[string]bool{}
-	for _, n := range mine {
-		ownedSet[n] = true
-	}
-
-	// Pre-collect node public IPs to avoid nested lock (instMu → nodesMu)
-	nodeIPs := make(map[string]string)
-	nodesMu.Lock()
-	for id, n := range nodes {
-		nodeIPs[id] = n.SSHHost
-	}
-	nodesMu.Unlock()
-
-	result := make([]map[string]interface{}, 0)
-	for _, c := range all {
-		if ownedSet[c.Name] {
-			data, _ := json.Marshal(c)
-			var entry map[string]interface{}
-			json.Unmarshal(data, &entry)
-			entry["terminalUrl"] = fmt.Sprintf("https://%s/terminal/%s", cfg.Domain, c.Name)
-
-			instMu.Lock()
-			if r, ok := instances[c.Name]; ok {
-				entry["state"] = r.State
-				if r.StateReason != "" {
-					entry["stateReason"] = r.StateReason
-				}
-				entry["region"] = r.Region
-				entry["nodeID"] = r.Node
-				entry["publicIP"] = nodeIPs[r.Node]
-				entry["label"] = r.Label
-			}
-			instMu.Unlock()
-
-			result = append(result, entry)
-		}
-	}
 	jsonOK(w, result)
 }
 
@@ -845,20 +792,7 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build response from instance record
-	resp := map[string]interface{}{
-		"id":          rec.Name,
-		"state":       rec.State,
-		"region":      rec.Region,
-		"nodeID":      rec.Node,
-		"publicIP":    getNodePublicIP(rec.Node),
-		"terminalUrl": fmt.Sprintf("https://%s/terminal/%s", cfg.Domain, name),
-		"userData":    rec.UserData,
-		"label":       rec.Label,
-	}
-	if rec.StateReason != "" {
-		resp["stateReason"] = rec.StateReason
-	}
-
+	resp := containerResponse(rec)
 	jsonOK(w, resp)
 }
 
@@ -1039,17 +973,7 @@ func handleRefreshContainer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := map[string]interface{}{
-		"id":          rec.Name,
-		"state":       rec.State,
-		"region":      rec.Region,
-		"nodeID":      rec.Node,
-		"publicIP":    getNodePublicIP(rec.Node),
-		"terminalUrl": fmt.Sprintf("https://%s/terminal/%s", cfg.Domain, name),
-	}
-	if rec.StateReason != "" {
-		resp["stateReason"] = rec.StateReason
-	}
+	resp := containerResponse(rec)
 	jsonOK(w, resp)
 }
 
@@ -1186,17 +1110,13 @@ func handleAdminCreateContainer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rec, ports, err := createContainerCore(req.UserID, req.UserData, req.CPU, req.Mem, req.Disk, req.ServicePort, req.Region, req.PlanID, req.Label)
+	rec, _, err := createContainerCore(req.UserID, req.UserData, req.CPU, req.Mem, req.Disk, req.ServicePort, req.Region, req.PlanID, req.Label)
 	if err != nil {
 		jsonError(w, err.Error(), 400)
 		return
 	}
 
-	resp := CreateResp{Status: "creating", ID: rec.Name, Ports: ports, CPU: rec.CPU, Mem: rec.Mem, Disk: rec.Disk, NodeID: rec.Node, Region: rec.Region, PublicIP: getNodePublicIP(rec.Node)}
-	if rec.Password != "" {
-		resp.Password = rec.Password
-	}
-	jsonOK(w, resp)
+	jsonOK(w, containerResponse(rec))
 }
 
 // handleAdminListContainers lists all containers, optionally filtered by ?userID=xxx.
@@ -1204,49 +1124,27 @@ func handleAdminListContainers(w http.ResponseWriter, r *http.Request) {
 	filterUserID := r.URL.Query().Get("userID")
 	filterLabel := r.URL.Query().Get("label")
 
-	// Pre-collect node public IPs to avoid nested lock (instMu → nodesMu)
-	nodeIPs := make(map[string]string)
-	nodesMu.Lock()
-	for id, n := range nodes {
-		nodeIPs[id] = n.SSHHost
-	}
-	nodesMu.Unlock()
-
 	instMu.Lock()
-	var result []map[string]interface{}
-	for name, rec := range instances {
+	var recs []*InstanceRecord
+	for _, rec := range instances {
 		if filterUserID != "" && rec.UserID != filterUserID {
 			continue
 		}
 		if filterLabel != "" && rec.Label != filterLabel {
 			continue
 		}
-		userName := ""
-		if ur, ok := getUserByID(rec.UserID); ok {
-			userName = ur.Name
-		}
-		result = append(result, map[string]interface{}{
-			"id":          name,
-			"userID":      rec.UserID,
-			"userName":    userName,
-			"password":    rec.Password,
-			"state":       rec.State,
-			"cpu":         rec.CPU,
-			"mem":         rec.Mem,
-			"disk":        rec.Disk,
-			"servicePort": rec.ServicePort,
-			"region":      rec.Region,
-			"node":        rec.Node,
-			"publicIP":    nodeIPs[rec.Node],
-			"ports":       map[string]int{"ssh": rec.SSHExtPort, "service": rec.ServiceExtPort},
-			"created":     rec.Created.Format(time.RFC3339),
-			"terminalUrl": fmt.Sprintf("https://%s/terminal/%s", cfg.Domain, name),
-			"stateReason": rec.StateReason,
-			"userData":    rec.UserData,
-			"label":       rec.Label,
-		})
+		recs = append(recs, rec)
 	}
 	instMu.Unlock()
+
+	var result []map[string]interface{}
+	for _, rec := range recs {
+		resp := containerResponse(rec)
+		if ur, ok := getUserByID(rec.UserID); ok {
+			resp["userName"] = ur.Name
+		}
+		result = append(result, resp)
+	}
 
 	// Sort by created time descending
 	sort.Slice(result, func(i, j int) bool {
@@ -1524,18 +1422,18 @@ func handleNodeContainers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	instMu.Lock()
-	var result []map[string]interface{}
-	for name, rec := range instances {
+	var recs []*InstanceRecord
+	for _, rec := range instances {
 		if rec.Node == nodeID {
-			result = append(result, map[string]interface{}{
-				"id":     name,
-				"userID": rec.UserID,
-				"plan":   map[string]int{"cpu": rec.CPU, "mem": rec.Mem, "disk": rec.Disk},
-				"ports":  map[string]int{"ssh": rec.SSHExtPort, "service": rec.ServiceExtPort},
-			})
+			recs = append(recs, rec)
 		}
 	}
 	instMu.Unlock()
+
+	result := make([]map[string]interface{}, 0, len(recs))
+	for _, rec := range recs {
+		result = append(result, containerResponse(rec))
+	}
 	jsonOK(w, result)
 }
 
@@ -2180,6 +2078,33 @@ func cmdServe() {
 		log.Printf("LXC Manager on http://:%s", port)
 		log.Fatal(http.ListenAndServe(":"+port, nil))
 	}
+}
+
+// containerResponse builds a consistent response map from an InstanceRecord.
+// All container API endpoints use this to return the same fields as instances.json.
+func containerResponse(rec *InstanceRecord) map[string]interface{} {
+	resp := map[string]interface{}{
+		"id":             rec.Name,
+		"cpu":            rec.CPU,
+		"mem":            rec.Mem,
+		"disk":           rec.Disk,
+		"servicePort":    rec.ServicePort,
+		"sshExtPort":     rec.SSHExtPort,
+		"serviceExtPort": rec.ServiceExtPort,
+		"userID":         rec.UserID,
+		"nodeID":         rec.Node,
+		"region":         rec.Region,
+		"publicIP":       getNodePublicIP(rec.Node),
+		"created":        rec.Created.Format(time.RFC3339),
+		"state":          rec.State,
+		"terminalUrl":    fmt.Sprintf("https://%s/terminal/%s", cfg.Domain, rec.Name),
+		"label":          rec.Label,
+		"userData":       rec.UserData,
+	}
+	if rec.StateReason != "" {
+		resp["stateReason"] = rec.StateReason
+	}
+	return resp
 }
 
 // ==================== Utilities ====================
