@@ -68,7 +68,13 @@ install_lxd() {
 init_lxd() {
     local pool_size="${STORAGE_POOL_SIZE:-10}"
 
-    # Idempotent: clean up any previous LXD initialization before re-creating.
+    # Idempotent: if default storage pool AND vpnbr0 network already exist, skip.
+    if lxc storage show default &>/dev/null 2>&1 && lxc network show vpnbr0 &>/dev/null 2>&1; then
+        log_info "LXD already initialized (storage + network exist), skipping."
+        return 0
+    fi
+
+    # Clean up any partial previous LXD initialization before re-creating.
     if lxc storage show default &>/dev/null 2>&1; then
         log_info "Removing existing storage pool 'default'..."
         lxc profile device remove default root 2>/dev/null || true
@@ -80,8 +86,15 @@ init_lxd() {
     fi
     rm -f /var/snap/lxd/common/lxd/disks/default.img
 
-    log_info "Initializing LXD with btrfs (${pool_size}GiB loop)..."
-    time lxd init --auto --storage-backend=btrfs --storage-create-loop="${pool_size}"
+    # Reset LXD database if previous init left stale state
+    if lxd init --auto --storage-backend=btrfs --storage-create-loop="${pool_size}" 2>&1 | grep -q "already been configured"; then
+        log_info "Resetting stale LXD configuration..."
+        systemctl stop snap.lxd.daemon 2>/dev/null || true
+        rm -f /var/snap/lxd/common/lxd/database/local.db
+        systemctl start snap.lxd.daemon 2>/dev/null || true
+        sleep 2
+        lxd init --auto --storage-backend=btrfs --storage-create-loop="${pool_size}"
+    fi
     log_info "LXD initialized with btrfs ${pool_size}GiB"
 }
 
