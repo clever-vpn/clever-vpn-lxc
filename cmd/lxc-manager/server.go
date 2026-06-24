@@ -648,11 +648,8 @@ func createContainerCore(userID string, userData string, cpu, mem, disk, service
 	}
 	nodesMu.Unlock()
 
-	password := ""
-	if strings.TrimSpace(userData) == "" {
-		password = genPasswd()
-		rec.Password = password
-	}
+	password := genPasswd()
+	rec.Password = password
 
 	if err := registerInstance(name, rec); err != nil {
 		return nil, PortInfo{}, fmt.Errorf("register: %v", err)
@@ -2235,10 +2232,22 @@ func mergeUserData(userSupplied, hostname, bootstrapContent, password string) st
 	inject := injectBlock(hostname, bootstrapContent)
 
 	if strings.TrimSpace(userSupplied) != "" {
+		result := ""
 		if strings.HasPrefix(strings.TrimSpace(userSupplied), "#cloud-config") {
-			return strings.TrimSpace(userSupplied) + "\n\n# injected by clever-vpn-lxc\n" + inject + "\n"
+			result = strings.TrimSpace(userSupplied) + "\n\n# injected by clever-vpn-lxc\n" + inject + "\n"
+		} else {
+			result = "#cloud-config\n" + strings.TrimSpace(userSupplied) + "\n\n" + inject + "\n"
 		}
-		return "#cloud-config\n" + strings.TrimSpace(userSupplied) + "\n\n" + inject + "\n"
+		// Always append default root password so it's recorded and accessible
+		result += "ssh_pwauth: true\n" +
+			"disable_root: false\n" +
+			"chpasswd:\n" +
+			"  expire: false\n" +
+			"  users:\n" +
+			"    - name: root\n" +
+			"      password: " + shellQuote(password) + "\n" +
+			"      type: text\n"
+		return result
 	}
 
 	return "#cloud-config\n" +
