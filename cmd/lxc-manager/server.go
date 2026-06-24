@@ -1313,10 +1313,10 @@ func handleNodeAdd(w http.ResponseWriter, r *http.Request) {
 		Name          string `json:"name"`
 		Region        string `json:"region"`
 		SSHHost       string `json:"sshHost"`
-		SSHPort       int    `json:"sshPort"`
+		SSHPort       int    `json:"sshPort,string"`
 		SSHPassword   string `json:"sshPassword"`
 		PoolSize      string `json:"poolSize"`
-		MaxContainers int    `json:"maxContainers"`
+		MaxContainers int    `json:"maxContainers,string"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "invalid body", 400)
@@ -1411,7 +1411,7 @@ func handleNodeUpdate(w http.ResponseWriter, r *http.Request) {
 
 	var req struct {
 		Status        *string `json:"status"`
-		MaxContainers *int    `json:"maxContainers"`
+		MaxContainers *int    `json:"maxContainers,string"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "invalid body", 400)
