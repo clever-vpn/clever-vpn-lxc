@@ -133,8 +133,8 @@ func removeNode(nodeID string) error {
 	for name, r := range instances {
 		if r.Node == nodeID {
 			r.Node = ""
-			r.Health = "lost"
-			r.HealthReason = "node removed"
+			r.State = "lost"
+			r.StateReason = "node removed"
 			log.Printf("Container %s marked lost (node %s removed)", name, nodeID)
 		}
 	}
@@ -311,7 +311,7 @@ func rebuildNode(nodeID string) error {
 	for _, rec := range instances {
 		if rec.NodePublicIP == n.SSHHost && rec.NodePublicIP != "" {
 			rec.Node = nodeID
-			rec.Health = "creating"
+			rec.State = "creating"
 			hasContainers = true
 		}
 	}
@@ -333,7 +333,7 @@ func rebuildNode(nodeID string) error {
 				instMu.Lock()
 				allHealthy := true
 				for _, rec := range instances {
-					if rec.Node == nodeID && (rec.Health == healthLost || rec.Health == "creating") {
+					if rec.Node == nodeID && (rec.State == stateLost || rec.State == "creating") {
 						allHealthy = false
 						break
 					}
@@ -371,7 +371,7 @@ func recreateAllContainersOnNode(nodeID string) {
 	instMu.Lock()
 	var toRebuild []*InstanceRecord
 	for _, rec := range instances {
-		if rec.Node == nodeID && (rec.Health == "creating" || rec.Health == healthLost) {
+		if rec.Node == nodeID && (rec.State == "creating" || rec.State == stateLost) {
 			toRebuild = append(toRebuild, rec)
 			// Pre-claim ports to avoid conflicts
 			usedSSH[rec.SSHExtPort] = true
@@ -412,7 +412,7 @@ func recreateAllContainersOnNode(nodeID string) {
 				log.Printf("Rebuild %s: forward svc: %v", r.Name, err)
 				return
 			}
-			r.Health = "healthy"
+			r.State = "running"
 			saveInstances()
 			log.Printf("Rebuild: %s restored (ssh:%d→%s:22 svc:%d→%s:%d)",
 				r.Name, r.SSHExtPort, r.StaticIP, r.ServiceExtPort, r.StaticIP, r.ServicePort)
@@ -432,7 +432,7 @@ func recoverOrphanContainersByPublicIP(nodeID string, sshHost string) {
 	instMu.Lock()
 	var toRecover []*InstanceRecord
 	for _, rec := range instances {
-		if rec.Node == "" && rec.Health == healthLost && rec.NodePublicIP == sshHost && rec.NodePublicIP != "" {
+		if rec.Node == "" && rec.State == stateLost && rec.NodePublicIP == sshHost && rec.NodePublicIP != "" {
 			toRecover = append(toRecover, rec)
 			// Pre-claim ports
 			usedSSH[rec.SSHExtPort] = true
@@ -455,7 +455,7 @@ func recoverOrphanContainersByPublicIP(nodeID string, sshHost string) {
 			rec.Name, rec.CPU, rec.Mem, rec.Disk, rec.SSHExtPort, rec.ServiceExtPort, rec.StaticIP)
 
 		rec.Node = nodeID
-		rec.Health = "creating"
+		rec.State = "creating"
 		saveInstances()
 
 		cloudConfig := mergeUserData(rec.UserData, rec.Name, bootstrapEnv(rec.Name, nodeID, rec.CPU, rec.Mem, rec.Disk,
@@ -479,7 +479,7 @@ func recoverOrphanContainersByPublicIP(nodeID string, sshHost string) {
 				log.Printf("Recovery %s: forward svc: %v", r.Name, err)
 				return
 			}
-			r.Health = "healthy"
+			r.State = "running"
 			saveInstances()
 			log.Printf("Recovery: %s restored (ssh:%d→%s:22 svc:%d→%s:%d)",
 				r.Name, r.SSHExtPort, r.StaticIP, r.ServiceExtPort, r.StaticIP, r.ServicePort)

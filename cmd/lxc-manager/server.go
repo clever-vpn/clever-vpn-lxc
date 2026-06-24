@@ -133,8 +133,8 @@ type InstanceRecord struct {
 	NodePublicIP   string    `json:"nodePublicIP,omitempty"`
 	UserData       string    `json:"userData,omitempty"`
 	Created        time.Time `json:"created"`
-	Health         string    `json:"health"`
-	HealthReason   string    `json:"healthReason,omitempty"`
+	State         string    `json:"state"`
+	StateReason   string    `json:"stateReason,omitempty"`
 }
 
 var (
@@ -249,8 +249,8 @@ func loadInstances() {
 	}
 	for i := range wrapper.Records {
 		r := &wrapper.Records[i]
-		if r.Health == "" {
-			r.Health = "healthy"
+		if r.State == "" {
+			r.State = "running"
 		}
 		// Auto-fix: infer region from node if missing (pre-v1.2.11 bug)
 		if r.Region == "" && r.Node != "" {
@@ -637,7 +637,7 @@ func createContainerCore(userID string, userData string, cpu, mem, disk, service
 		UserID:      userID,
 		Node:        nodeID,
 		Region:      region,
-		Health:      "healthy",
+		State:      "running",
 		UserData:    userData,
 	}
 
@@ -793,9 +793,9 @@ func handleList(w http.ResponseWriter, r *http.Request) {
 
 			instMu.Lock()
 			if r, ok := instances[c.Name]; ok {
-				entry["health"] = r.Health
-				if r.HealthReason != "" {
-					entry["healthReason"] = r.HealthReason
+				entry["state"] = r.State
+				if r.StateReason != "" {
+					entry["stateReason"] = r.StateReason
 				}
 				entry["region"] = r.Region
 				entry["nodeID"] = r.Node
@@ -830,27 +830,17 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build response from instance record + optional LXD state
+	// Build response from instance record
 	resp := map[string]interface{}{
 		"name":        rec.Name,
-		"health":      rec.Health,
+		"state":       rec.State,
 		"region":      rec.Region,
 		"nodeID":      rec.Node,
 		"publicIP":    getNodePublicIP(rec.Node),
 		"terminalUrl": fmt.Sprintf("https://%s/terminal/%s", cfg.Domain, name),
-		"status":      "unknown",
 	}
-	if rec.HealthReason != "" {
-		resp["healthReason"] = rec.HealthReason
-	}
-
-	cli := clientForInstance(name)
-	if cli != nil {
-		c, err := cli.GetContainer(name)
-		if err == nil {
-			resp["status"] = c.Status
-			resp["state"] = c.State
-		}
+	if rec.StateReason != "" {
+		resp["stateReason"] = rec.StateReason
 	}
 
 	jsonOK(w, resp)
@@ -1003,10 +993,9 @@ func handleRestart(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleRefreshContainer(w http.ResponseWriter, r *http.Request) {
-	name := stripPrefix(strings.TrimSuffix(r.URL.Path, "/refresh"), "/api/containers/")
+	name := stripPrefix(strings.TrimSuffix(r.URL.Path, "/refresh"), "/api/admin/containers/")
 
-	ok, userID := validateUser(r)
-	if !ok {
+	if !validateAdmin(r) {
 		jsonError(w, "unauthorized", 401)
 		return
 	}
@@ -1014,7 +1003,7 @@ func handleRefreshContainer(w http.ResponseWriter, r *http.Request) {
 	instMu.Lock()
 	rec, exists := instances[name]
 	instMu.Unlock()
-	if !exists || rec.UserID != userID {
+	if !exists {
 		jsonError(w, "not found", 404)
 		return
 	}
@@ -1036,15 +1025,14 @@ func handleRefreshContainer(w http.ResponseWriter, r *http.Request) {
 
 	resp := map[string]interface{}{
 		"name":        rec.Name,
-		"health":      rec.Health,
+		"state":       rec.State,
 		"region":      rec.Region,
 		"nodeID":      rec.Node,
 		"publicIP":    getNodePublicIP(rec.Node),
 		"terminalUrl": fmt.Sprintf("https://%s/terminal/%s", cfg.Domain, name),
-		"status":      "refreshed",
 	}
-	if rec.HealthReason != "" {
-		resp["healthReason"] = rec.HealthReason
+	if rec.StateReason != "" {
+		resp["stateReason"] = rec.StateReason
 	}
 	jsonOK(w, resp)
 }
@@ -1214,7 +1202,7 @@ func handleAdminListContainers(w http.ResponseWriter, r *http.Request) {
 			"userID":       rec.UserID,
 			"userName":     userName,
 			"password":     rec.Password,
-			"status":       rec.Health,
+			"state":       rec.State,
 			"cpu":          rec.CPU,
 			"mem":          rec.Mem,
 			"disk":         rec.Disk,
@@ -1225,8 +1213,7 @@ func handleAdminListContainers(w http.ResponseWriter, r *http.Request) {
 			"ports":        map[string]int{"ssh": rec.SSHExtPort, "service": rec.ServiceExtPort},
 			"created":      rec.Created.Format(time.RFC3339),
 			"terminalUrl":  fmt.Sprintf("https://%s/terminal/%s", cfg.Domain, name),
-			"health":       rec.Health,
-			"healthReason": rec.HealthReason,
+			"stateReason": rec.StateReason,
 		})
 	}
 	instMu.Unlock()
@@ -2016,6 +2003,12 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		handleAdminResizeContainer(w, r)
+	case strings.HasPrefix(p, "/api/admin/containers/") && strings.HasSuffix(p, "/refresh") && r.Method == "POST":
+		if !validateAdmin(r) {
+			jsonError(w, "unauthorized", 401)
+			return
+		}
+		handleRefreshContainer(w, r)
 	case strings.HasPrefix(p, "/api/admin/containers/") && r.Method == "DELETE":
 		if !validateAdmin(r) {
 			jsonError(w, "unauthorized", 401)
@@ -2035,8 +2028,6 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		handleRestart(w, r)
 	case strings.HasPrefix(p, "/api/containers/") && strings.HasSuffix(p, "/resize") && r.Method == "PUT":
 		handleResize(w, r)
-	case strings.HasPrefix(p, "/api/containers/") && strings.HasSuffix(p, "/refresh") && r.Method == "POST":
-		handleRefreshContainer(w, r)
 	case strings.HasPrefix(p, "/api/containers/") && r.Method == "GET":
 		handleGet(w, r)
 	case strings.HasPrefix(p, "/api/containers/") && r.Method == "DELETE":
@@ -2147,7 +2138,7 @@ func cmdServe() {
 			log.Fatal(http.ListenAndServe(":80", redirector))
 		}()
 
-		startHealthCheckLoop()
+		startStateCheckLoop()
 		startSyncLoop()
 		select {} // block forever
 	} else if tlsCert != "" && tlsKey != "" {
