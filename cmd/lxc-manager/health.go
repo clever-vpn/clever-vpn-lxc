@@ -41,9 +41,6 @@ func checkAllContainers() {
 	// Check node health first — container health depends on it.
 	checkAllNodes()
 
-	// Restore DNAT rules on all active nodes (iptables lost after reboot)
-	syncAllDNAT()
-
 	instMu.Lock()
 	names := make([]string, 0, len(instances))
 	for name := range instances {
@@ -94,7 +91,13 @@ func checkNodeHealth(nodeID string) {
 		return
 	}
 
+	wasOffline := n.Status == "offline"
 	setNodeStatus(nodeID, "active", "")
+
+	// Node just recovered from offline — restore DNAT (iptables lost after reboot)
+	if wasOffline {
+		syncDNATForNode(nodeID)
+	}
 }
 
 func checkContainer(name string) {
@@ -246,37 +249,25 @@ func recoverMissingContainer(rec *InstanceRecord) {
 	}()
 }
 
-// syncAllDNAT restores port forwarding rules for all containers on active nodes.
-// Called periodically to recover rules lost after node reboot (iptables is ephemeral).
-func syncAllDNAT() {
+// syncDNATForNode restores port forwarding for all containers on a node.
+// Called when a node recovers from offline → active (iptables lost after reboot).
+func syncDNATForNode(nodeID string) {
 	instMu.Lock()
 	defer instMu.Unlock()
 
 	for _, rec := range instances {
-		if rec.Node == "" || rec.StaticIP == "" {
+		if rec.Node != nodeID || rec.StaticIP == "" {
 			continue
 		}
-
-		nodesMu.Lock()
-		n, ok := nodes[rec.Node]
-		nodesMu.Unlock()
-		if !ok || n.Status != "active" {
-			continue // node not active yet, skip
-		}
-
-		cli, err := getNodeClient(rec.Node)
+		cli, err := getNodeClient(nodeID)
 		if err != nil {
 			continue
 		}
-
-		// Check if the container exists
 		_, err = cli.GetContainer(rec.Name)
 		if err != nil {
-			continue // container not in LXD yet, skip
+			continue // container not in LXD yet
 		}
-
-		// Restore DNAT (idempotent — addPortForward checks existing rules)
-		addPortForward(rec.Node, rec.SSHExtPort, rec.StaticIP, 22)
-		addPortForward(rec.Node, rec.ServiceExtPort, rec.StaticIP, rec.ServicePort)
+		addPortForward(nodeID, rec.SSHExtPort, rec.StaticIP, 22)
+		addPortForward(nodeID, rec.ServiceExtPort, rec.StaticIP, rec.ServicePort)
 	}
 }
