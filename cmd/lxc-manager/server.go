@@ -32,6 +32,7 @@ type CreateReq struct {
 	UserData    string `json:"userData"`
 	Region      string `json:"region"`
 	PlanID      string `json:"planId"`
+	Label       string `json:"label"`
 }
 
 type CreateResp struct {
@@ -67,6 +68,7 @@ type AdminCreateContainerReq struct {
 	UserData    string `json:"userData"`
 	Region      string `json:"region"`
 	PlanID      string `json:"planId"`
+	Label       string `json:"label"`
 }
 
 type APIError struct {
@@ -135,6 +137,7 @@ type InstanceRecord struct {
 	Created        time.Time `json:"created"`
 	State         string    `json:"state"`
 	StateReason   string    `json:"stateReason,omitempty"`
+	Label         string    `json:"label,omitempty"`
 }
 
 var (
@@ -567,7 +570,7 @@ func recoverInstances() {
 
 // createContainerCore handles the shared container creation flow.
 // Returns the instance record and port info on success.
-func createContainerCore(userID string, userData string, cpu, mem, disk, servicePort int, region string, planID string) (*InstanceRecord, PortInfo, error) {
+func createContainerCore(userID string, userData string, cpu, mem, disk, servicePort int, region string, planID string, label string) (*InstanceRecord, PortInfo, error) {
 	if servicePort <= 0 || servicePort > 65535 {
 		return nil, PortInfo{}, fmt.Errorf("servicePort required (1-65535)")
 	}
@@ -639,6 +642,7 @@ func createContainerCore(userID string, userData string, cpu, mem, disk, service
 		Region:      region,
 		State:      "running",
 		UserData:    userData,
+		Label:       label,
 	}
 
 	// Save node's public IP for disaster recovery (re-create container if node is rebuilt with same IP)
@@ -700,7 +704,7 @@ func handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rec, ports, err := createContainerCore(userID, req.UserData, req.CPU, req.Mem, req.Disk, req.ServicePort, req.Region, req.PlanID)
+	rec, ports, err := createContainerCore(userID, req.UserData, req.CPU, req.Mem, req.Disk, req.ServicePort, req.Region, req.PlanID, req.Label)
 	if err != nil {
 		jsonError(w, err.Error(), 400)
 		return
@@ -747,11 +751,15 @@ func handleList(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "unauthorized", 401)
 		return
 	}
+	filterLabel := r.URL.Query().Get("label")
 
 	instMu.Lock()
 	var mine []string
 	for name, rec := range instances {
 		if rec.UserID == userID {
+			if filterLabel != "" && rec.Label != filterLabel {
+				continue
+			}
 			mine = append(mine, name)
 		}
 	}
@@ -805,6 +813,7 @@ func handleList(w http.ResponseWriter, r *http.Request) {
 				entry["region"] = r.Region
 				entry["nodeID"] = r.Node
 				entry["publicIP"] = nodeIPs[r.Node]
+				entry["label"] = r.Label
 			}
 			instMu.Unlock()
 
@@ -844,6 +853,7 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 		"publicIP":    getNodePublicIP(rec.Node),
 		"terminalUrl": fmt.Sprintf("https://%s/terminal/%s", cfg.Domain, name),
 		"userData":    rec.UserData,
+		"label":       rec.Label,
 	}
 	if rec.StateReason != "" {
 		resp["stateReason"] = rec.StateReason
@@ -1176,7 +1186,7 @@ func handleAdminCreateContainer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rec, ports, err := createContainerCore(req.UserID, req.UserData, req.CPU, req.Mem, req.Disk, req.ServicePort, req.Region, req.PlanID)
+	rec, ports, err := createContainerCore(req.UserID, req.UserData, req.CPU, req.Mem, req.Disk, req.ServicePort, req.Region, req.PlanID, req.Label)
 	if err != nil {
 		jsonError(w, err.Error(), 400)
 		return
@@ -1192,6 +1202,7 @@ func handleAdminCreateContainer(w http.ResponseWriter, r *http.Request) {
 // handleAdminListContainers lists all containers, optionally filtered by ?userID=xxx.
 func handleAdminListContainers(w http.ResponseWriter, r *http.Request) {
 	filterUserID := r.URL.Query().Get("userID")
+	filterLabel := r.URL.Query().Get("label")
 
 	// Pre-collect node public IPs to avoid nested lock (instMu → nodesMu)
 	nodeIPs := make(map[string]string)
@@ -1205,6 +1216,9 @@ func handleAdminListContainers(w http.ResponseWriter, r *http.Request) {
 	var result []map[string]interface{}
 	for name, rec := range instances {
 		if filterUserID != "" && rec.UserID != filterUserID {
+			continue
+		}
+		if filterLabel != "" && rec.Label != filterLabel {
 			continue
 		}
 		userName := ""
@@ -1229,6 +1243,7 @@ func handleAdminListContainers(w http.ResponseWriter, r *http.Request) {
 			"terminalUrl":  fmt.Sprintf("https://%s/terminal/%s", cfg.Domain, name),
 			"stateReason": rec.StateReason,
 			"userData":     rec.UserData,
+			"label":        rec.Label,
 		})
 	}
 	instMu.Unlock()
