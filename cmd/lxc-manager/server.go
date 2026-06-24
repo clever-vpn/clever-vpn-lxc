@@ -200,7 +200,10 @@ func loadCursors() {
 	path := filepathJoin(ensureDataDir(), cursorFile)
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return // first run, start from defaults
+		// First run: initialize cursors to their base values
+		sshCursor = sshPortBase
+		svcCursor = servicePortBase
+		return
 	}
 	var s struct {
 		Version  int            `json:"version"`
@@ -210,6 +213,8 @@ func loadCursors() {
 	}
 	if err := json.Unmarshal(data, &s); err != nil {
 		log.Printf("WARNING: parse cursors: %v (starting fresh)", err)
+		sshCursor = sshPortBase
+		svcCursor = servicePortBase
 		return
 	}
 	cursorMu.Lock()
