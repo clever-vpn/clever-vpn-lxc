@@ -843,6 +843,7 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 		"nodeID":      rec.Node,
 		"publicIP":    getNodePublicIP(rec.Node),
 		"terminalUrl": fmt.Sprintf("https://%s/terminal/%s", cfg.Domain, name),
+		"userData":    rec.UserData,
 	}
 	if rec.StateReason != "" {
 		resp["stateReason"] = rec.StateReason
@@ -1227,6 +1228,7 @@ func handleAdminListContainers(w http.ResponseWriter, r *http.Request) {
 			"created":      rec.Created.Format(time.RFC3339),
 			"terminalUrl":  fmt.Sprintf("https://%s/terminal/%s", cfg.Domain, name),
 			"stateReason": rec.StateReason,
+			"userData":     rec.UserData,
 		})
 	}
 	instMu.Unlock()
