@@ -228,7 +228,7 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 
 **响应** `200`：容器列表，包含 `terminalUrl`、`state`、`region`、`nodeID`、`publicIP` 和 `label` 字段。
 
-### `GET /api/containers/{name}` — 获取容器详情
+### `GET /api/containers/{id}` — 获取容器详情
 
 只能查看自己的容器。
 
@@ -252,19 +252,19 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 | `state` | string | 容器状态，见[容器状态](#容器状态) |
 | `stateReason` | string | 状态原因（非 `running` 时出现） |
 
-### `POST /api/containers/{name}/start` — 启动容器
+### `POST /api/containers/{id}/start` — 启动容器
 
 **请求头**：`Authorization: Bearer <user-token>`
 
-### `POST /api/containers/{name}/stop` — 停止容器
+### `POST /api/containers/{id}/stop` — 停止容器
 
 **请求头**：`Authorization: Bearer <user-token>`
 
-### `POST /api/containers/{name}/restart` — 重启容器
+### `POST /api/containers/{id}/restart` — 重启容器
 
 **请求头**：`Authorization: Bearer <user-token>`
 
-### `PUT /api/containers/{name}/resize` — 调整容器规格
+### `PUT /api/containers/{id}/resize` — 调整容器规格
 
 可单独调整 CPU、内存或磁盘，传 0 表示保持不变。
 
@@ -280,7 +280,7 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 { "status": "resized", "cpu": 2, "mem": 2048, "disk": 20 }
 ```
 
-### `DELETE /api/containers/{name}` — 删除容器
+### `DELETE /api/containers/{id}` — 删除容器
 
 停止并删除容器，清理端口转发。
 
@@ -522,15 +522,15 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 
 **请求头**：`Authorization: Bearer <admin-token>`
 
-#### `DELETE /api/admin/containers/{name}`
+#### `DELETE /api/admin/containers/{id}`
 
-#### `POST /api/admin/containers/{name}/start`
+#### `POST /api/admin/containers/{id}/start`
 
-#### `POST /api/admin/containers/{name}/stop`
+#### `POST /api/admin/containers/{id}/stop`
 
-#### `POST /api/admin/containers/{name}/restart`
+#### `POST /api/admin/containers/{id}/restart`
 
-#### `POST /api/admin/containers/{name}/refresh` — 立即刷新容器状态
+#### `POST /api/admin/containers/{id}/refresh` — 立即刷新容器状态
 
 触发即时状态检查：先检查所属节点连通性，再检查容器运行状态，完成后返回最新的容器记录。
 
@@ -554,7 +554,7 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 
 浏览器直接登录容器命令行。
 
-**URL**：`https://<domain>/terminal/<container-name>`
+**URL**：`https://<domain>/terminal/<container-id>`
 
 容器 API 响应中包含 `terminalUrl` 字段，打开后输入 root 密码即可连接。
 
@@ -562,7 +562,7 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 
 ## 容器状态
 
-后台每 **60 秒** 自动检查所有容器和节点的状态。管理员可通过 `POST /api/admin/containers/{name}/refresh` 和 `POST /api/nodes/{id}/refresh` 手动触发即时检查。
+后台每 **60 秒** 自动检查所有容器和节点的状态。管理员可通过 `POST /api/admin/containers/{id}/refresh` 和 `POST /api/nodes/{id}/refresh` 手动触发即时检查。
 
 容器列表和详情接口返回 `state` 字段：
 
@@ -596,8 +596,8 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 
 ```
 POST /api/containers  →  创建 LXD 容器 → 分配端口 → 配置 DNAT → 启动 → 返回连接信息
-DELETE /api/containers/{name} → 停止容器 → 清理 DNAT → 删除容器 → 清理注册
-PUT /api/containers/{name}/resize → 在线调整 CPU/内存
+DELETE /api/containers/{id} → 停止容器 → 清理 DNAT → 删除容器 → 清理注册
+PUT /api/containers/{id}/resize → 在线调整 CPU/内存
 ```
 
 ---

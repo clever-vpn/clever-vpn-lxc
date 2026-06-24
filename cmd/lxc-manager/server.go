@@ -135,9 +135,9 @@ type InstanceRecord struct {
 	NodePublicIP   string    `json:"nodePublicIP,omitempty"`
 	UserData       string    `json:"userData,omitempty"`
 	Created        time.Time `json:"created"`
-	State         string    `json:"state"`
-	StateReason   string    `json:"stateReason,omitempty"`
-	Label         string    `json:"label,omitempty"`
+	State          string    `json:"state"`
+	StateReason    string    `json:"stateReason,omitempty"`
+	Label          string    `json:"label,omitempty"`
 }
 
 var (
@@ -149,15 +149,15 @@ var (
 
 	// Cursor-based allocation: next value to try, incremented on each alloc.
 	// Persisted to state file so they survive restarts.
-	sshCursor     int
-	svcCursor     int
-	ipCursor      = map[string]int{} // nodeID → next IP suffix
-	cursorMu      sync.Mutex
+	sshCursor int
+	svcCursor int
+	ipCursor  = map[string]int{} // nodeID → next IP suffix
+	cursorMu  sync.Mutex
 )
 
 const ipBase = "10.0.1."
 const ipStart = 100
-const ipMax   = 250
+const ipMax = 250
 
 const (
 	sshPortBase     = 22000
@@ -190,10 +190,10 @@ func saveCursors() {
 	cursorMu.Lock()
 	defer cursorMu.Unlock()
 	data, _ := json.MarshalIndent(map[string]interface{}{
-		"sshCursor":  sshCursor,
-		"svcCursor":  svcCursor,
-		"ipCursor":   ipCursor,
-		"version":    1,
+		"sshCursor": sshCursor,
+		"svcCursor": svcCursor,
+		"ipCursor":  ipCursor,
+		"version":   1,
 	}, "", "  ")
 	os.WriteFile(filepathJoin(ensureDataDir(), cursorFile), data, 0600)
 }
@@ -640,7 +640,7 @@ func createContainerCore(userID string, userData string, cpu, mem, disk, service
 		UserID:      userID,
 		Node:        nodeID,
 		Region:      region,
-		State:      "running",
+		State:       "running",
 		UserData:    userData,
 		Label:       label,
 	}
@@ -846,7 +846,7 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 
 	// Build response from instance record
 	resp := map[string]interface{}{
-		"name":        rec.Name,
+		"id":          rec.Name,
 		"state":       rec.State,
 		"region":      rec.Region,
 		"nodeID":      rec.Node,
@@ -1226,24 +1226,24 @@ func handleAdminListContainers(w http.ResponseWriter, r *http.Request) {
 			userName = ur.Name
 		}
 		result = append(result, map[string]interface{}{
-			"id":           name,
-			"userID":       rec.UserID,
-			"userName":     userName,
-			"password":     rec.Password,
+			"id":          name,
+			"userID":      rec.UserID,
+			"userName":    userName,
+			"password":    rec.Password,
 			"state":       rec.State,
-			"cpu":          rec.CPU,
-			"mem":          rec.Mem,
-			"disk":         rec.Disk,
-			"servicePort":  rec.ServicePort,
-			"region":       rec.Region,
-			"node":         rec.Node,
-			"publicIP":     nodeIPs[rec.Node],
-			"ports":        map[string]int{"ssh": rec.SSHExtPort, "service": rec.ServiceExtPort},
-			"created":      rec.Created.Format(time.RFC3339),
-			"terminalUrl":  fmt.Sprintf("https://%s/terminal/%s", cfg.Domain, name),
+			"cpu":         rec.CPU,
+			"mem":         rec.Mem,
+			"disk":        rec.Disk,
+			"servicePort": rec.ServicePort,
+			"region":      rec.Region,
+			"node":        rec.Node,
+			"publicIP":    nodeIPs[rec.Node],
+			"ports":       map[string]int{"ssh": rec.SSHExtPort, "service": rec.ServiceExtPort},
+			"created":     rec.Created.Format(time.RFC3339),
+			"terminalUrl": fmt.Sprintf("https://%s/terminal/%s", cfg.Domain, name),
 			"stateReason": rec.StateReason,
-			"userData":     rec.UserData,
-			"label":        rec.Label,
+			"userData":    rec.UserData,
+			"label":       rec.Label,
 		})
 	}
 	instMu.Unlock()
@@ -1548,10 +1548,10 @@ func handleNodeUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		MaxContainers flexInt     `json:"maxContainers"`
-		SSHPassword   *string     `json:"sshPassword"`
-		SSHPort       flexInt     `json:"sshPort"`
-		PoolSize      flexString  `json:"poolSize"`
+		MaxContainers flexInt    `json:"maxContainers"`
+		SSHPassword   *string    `json:"sshPassword"`
+		SSHPort       flexInt    `json:"sshPort"`
+		PoolSize      flexString `json:"poolSize"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "invalid body", 400)
