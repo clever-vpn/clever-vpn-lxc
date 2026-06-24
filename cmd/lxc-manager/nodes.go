@@ -103,6 +103,12 @@ func addNode(rec *NodeRecord) error {
 			return fmt.Errorf("node name %s already exists", rec.Name)
 		}
 	}
+	// Check SSH host uniqueness — one IP = one LXD instance
+	for _, n := range nodes {
+		if n.SSHHost == rec.SSHHost {
+			return fmt.Errorf("node with SSH host %s already exists (id=%s)", rec.SSHHost, n.ID)
+		}
+	}
 	if rec.ID == "" {
 		rec.ID = generateNodeID()
 	}
