@@ -181,6 +181,21 @@ setup_ufw_allow_lxd_api() {
     log_info "UFW: allowed LXD API port 8443/tcp"
 }
 
+# Allow container port ranges for external access (SSH and service ports).
+setup_ufw_container_ports() {
+    if ! command -v ufw &>/dev/null; then
+        return 0
+    fi
+    if ! ufw status 2>/dev/null | grep -q 'Status: active'; then
+        return 0
+    fi
+    ufw allow 22000:22999/tcp comment 'Container SSH ports' 2>/dev/null || true
+    ufw allow 22000:22999/udp comment 'Container SSH ports' 2>/dev/null || true
+    ufw allow 50000:54999/tcp comment 'Container service ports' 2>/dev/null || true
+    ufw allow 50000:54999/udp comment 'Container service ports' 2>/dev/null || true
+    log_info "UFW: allowed container port ranges"
+}
+
 # ==================== 基础镜像构建 ====================
 build_base_image() {
     if lxc image show "$BASE_IMAGE_ALIAS" &>/dev/null; then
@@ -319,6 +334,7 @@ main() {
     setup_kernel_config
     setup_lxd_remote
     setup_ufw_allow_lxd_api
+    setup_ufw_container_ports
     build_base_image
     setup_iptables_persist
 
