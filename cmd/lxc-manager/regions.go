@@ -42,7 +42,7 @@ func loadRegions() {
 		log.Fatalf("read regions: %v", err)
 	}
 	var wrapper struct {
-		Version int             `json:"version"`
+		Version int            `json:"version"`
 		Records []RegionRecord `json:"records"`
 	}
 	if err := json.Unmarshal(data, &wrapper); err != nil {
@@ -57,7 +57,7 @@ func loadRegions() {
 
 func saveRegions() {
 	var wrapper struct {
-		Version int             `json:"version"`
+		Version int            `json:"version"`
 		Records []RegionRecord `json:"records"`
 	}
 	wrapper.Version = 1
