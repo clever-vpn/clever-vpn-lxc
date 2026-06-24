@@ -21,7 +21,7 @@ var (
 	healthFails = map[string]int{} // container name → consecutive failures
 )
 
-const healthCheckInterval = 30 * time.Second
+const healthCheckInterval = 60 * time.Second
 const healthMaxFails = 3
 const healthExecTimeout = 5 * time.Second
 

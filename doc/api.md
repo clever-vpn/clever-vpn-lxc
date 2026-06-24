@@ -259,6 +259,25 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 
 **请求头**：`Authorization: Bearer <user-token>`
 
+### `POST /api/containers/{name}/refresh` — 立即刷新容器状态
+
+触发即时健康检查：先检查所属节点连通性，再检查容器运行状态，完成后返回最新的容器记录。
+
+**请求头**：`Authorization: Bearer <user-token>`
+
+**响应** `200`：
+```json
+{
+  "name": "my-container",
+  "health": "healthy",
+  "region": "nrt",
+  "nodeID": "nd_abc123",
+  "publicIP": "1.2.3.4",
+  "terminalUrl": "https://lxc-api.clever-clouds.com/terminal/my-container",
+  "status": "refreshed"
+}
+```
+
 ### `PUT /api/containers/{name}/resize` — 调整容器规格
 
 可单独调整 CPU、内存或磁盘，传 0 表示保持不变。
@@ -401,9 +420,40 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 
 **请求头**：`Authorization: Bearer <admin-token>`
 
+**响应** `200`：返回完整的节点记录，`status` 为 `"rebuilding"`：
+```json
+{
+  "nodeID": "nd_abc123",
+  "name": "node-local",
+  "status": "rebuilding",
+  "region": "nrt",
+  "sshHost": "1.2.3.4",
+  "sshPort": 2222,
+  "poolSize": "15",
+  "maxContainers": 10,
+  "statusReason": "administrator requested rebuild"
+}
+```
+
+#### `POST /api/nodes/{id}/refresh` — 立即刷新节点状态
+
+触发即时健康检查，通过 LXD API 验证节点连通性，完成后返回最新的节点记录。
+
+**请求头**：`Authorization: Bearer <admin-token>`
+
 **响应** `200`：
 ```json
-{ "status": "rebuilding", "nodeID": "nd_abc123" }
+{
+  "nodeID": "nd_abc123",
+  "name": "node-local",
+  "status": "active",
+  "region": "nrt",
+  "sshHost": "1.2.3.4",
+  "sshPort": 2222,
+  "poolSize": "15",
+  "maxContainers": 10,
+  "statusReason": ""
+}
 ```
 
 #### `GET /api/nodes/{id}/containers` — 节点上所有容器
@@ -507,6 +557,8 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 ---
 
 ## 容器健康状态
+
+后台每 **60 秒** 自动检查所有容器和节点的健康状态。用户也可通过 `POST /api/containers/{name}/refresh` 和 `POST /api/nodes/{id}/refresh` 手动触发即时检查。
 
 容器列表和详情接口返回 `health` 字段：
 

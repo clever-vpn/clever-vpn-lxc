@@ -1002,6 +1002,53 @@ func handleRestart(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]string{"status": "restarted"})
 }
 
+func handleRefreshContainer(w http.ResponseWriter, r *http.Request) {
+	name := stripPrefix(strings.TrimSuffix(r.URL.Path, "/refresh"), "/api/containers/")
+
+	ok, userID := validateUser(r)
+	if !ok {
+		jsonError(w, "unauthorized", 401)
+		return
+	}
+
+	instMu.Lock()
+	rec, exists := instances[name]
+	instMu.Unlock()
+	if !exists || rec.UserID != userID {
+		jsonError(w, "not found", 404)
+		return
+	}
+
+	// Check node health first, then container health
+	if rec.Node != "" {
+		checkNodeHealth(rec.Node)
+	}
+	checkContainer(name)
+
+	// Re-read and return updated record
+	instMu.Lock()
+	rec, exists = instances[name]
+	instMu.Unlock()
+	if !exists {
+		jsonError(w, "not found", 404)
+		return
+	}
+
+	resp := map[string]interface{}{
+		"name":        rec.Name,
+		"health":      rec.Health,
+		"region":      rec.Region,
+		"nodeID":      rec.Node,
+		"publicIP":    getNodePublicIP(rec.Node),
+		"terminalUrl": fmt.Sprintf("https://%s/terminal/%s", cfg.Domain, name),
+		"status":      "refreshed",
+	}
+	if rec.HealthReason != "" {
+		resp["healthReason"] = rec.HealthReason
+	}
+	jsonOK(w, resp)
+}
+
 func handlePlans(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "GET" {
 		region := r.URL.Query().Get("region")
@@ -1528,7 +1575,58 @@ func handleNodeRebuild(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), 500)
 		return
 	}
-	jsonOK(w, map[string]string{"status": "rebuilding", "nodeID": nodeID})
+
+	// Return full node record after triggering rebuild
+	nodesMu.Lock()
+	n, ok := nodes[nodeID]
+	nodesMu.Unlock()
+	if !ok {
+		jsonError(w, "node not found", 404)
+		return
+	}
+
+	jsonOK(w, map[string]interface{}{
+		"nodeID":        n.ID,
+		"name":          n.Name,
+		"status":        n.Status,
+		"region":        n.Region,
+		"sshHost":       n.SSHHost,
+		"sshPort":       n.SSHPort,
+		"poolSize":      n.PoolSize,
+		"maxContainers": n.MaxContainers,
+		"statusReason":  n.StatusReason,
+	})
+}
+
+// handleRefreshNode triggers an immediate health check for a node and returns its record.
+func handleRefreshNode(w http.ResponseWriter, r *http.Request) {
+	nodeID := stripPrefix(strings.TrimSuffix(r.URL.Path, "/refresh"), "/api/nodes/")
+	if nodeID == "" {
+		jsonError(w, "node id required", 400)
+		return
+	}
+
+	checkNodeHealth(nodeID)
+
+	nodesMu.Lock()
+	n, ok := nodes[nodeID]
+	nodesMu.Unlock()
+	if !ok {
+		jsonError(w, "node not found", 404)
+		return
+	}
+
+	jsonOK(w, map[string]interface{}{
+		"nodeID":        n.ID,
+		"name":          n.Name,
+		"status":        n.Status,
+		"region":        n.Region,
+		"sshHost":       n.SSHHost,
+		"sshPort":       n.SSHPort,
+		"poolSize":      n.PoolSize,
+		"maxContainers": n.MaxContainers,
+		"statusReason":  n.StatusReason,
+	})
 }
 
 // ==================== User Handlers ====================
@@ -1834,6 +1932,12 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		handleNodeRebuild(w, r)
+	case strings.HasPrefix(p, "/api/nodes/") && strings.HasSuffix(p, "/refresh") && r.Method == "POST":
+		if !validateAdmin(r) {
+			jsonError(w, "unauthorized", 401)
+			return
+		}
+		handleRefreshNode(w, r)
 	case strings.HasPrefix(p, "/api/nodes/") && !strings.Contains(p, "/containers") && r.Method == "PUT":
 		if !validateAdmin(r) {
 			jsonError(w, "unauthorized", 401)
@@ -1931,6 +2035,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		handleRestart(w, r)
 	case strings.HasPrefix(p, "/api/containers/") && strings.HasSuffix(p, "/resize") && r.Method == "PUT":
 		handleResize(w, r)
+	case strings.HasPrefix(p, "/api/containers/") && strings.HasSuffix(p, "/refresh") && r.Method == "POST":
+		handleRefreshContainer(w, r)
 	case strings.HasPrefix(p, "/api/containers/") && r.Method == "GET":
 		handleGet(w, r)
 	case strings.HasPrefix(p, "/api/containers/") && r.Method == "DELETE":

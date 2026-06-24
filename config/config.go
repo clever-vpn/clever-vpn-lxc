@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"encoding/json"
@@ -35,9 +35,9 @@ type BackupConfig struct {
 	R2SecretAccessKey string `json:"r2_secret_access_key"`
 }
 
-var cfg Config
+var Cfg Config
 
-func defaultConfig() Config {
+func DefaultConfig() Config {
 	return Config{
 		Port:            "8080",
 		LXDClientCert:   "client.crt",
@@ -53,8 +53,8 @@ func defaultConfig() Config {
 	}
 }
 
-func loadConfig(path string) {
-	cfg = defaultConfig()
+func LoadConfig(path string) {
+	Cfg = DefaultConfig()
 
 	if path == "" {
 		path = "/etc/lxc-manager/config.json"
@@ -67,14 +67,14 @@ func loadConfig(path string) {
 		}
 		log.Fatalf("read config %s: %v", path, err)
 	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
+	if err := json.Unmarshal(data, &Cfg); err != nil {
 		log.Fatalf("parse config %s: %v", path, err)
 	}
 	log.Printf("Loaded config from %s", path)
 }
 
-// resolveEnv replaces $VAR and ${VAR} in a string.
-func resolveEnv(s string) string {
+// ResolveEnv replaces $VAR and ${VAR} in a string.
+func ResolveEnv(s string) string {
 	if !strings.Contains(s, "$") {
 		return s
 	}
@@ -88,52 +88,71 @@ func resolveEnv(s string) string {
 	return s
 }
 
-// resolveBackupEnv replaces env vars in backup config (for secrets).
-func resolveBackupEnv() {
-	cfg.Backup.R2AccessKeyID = resolveEnv(cfg.Backup.R2AccessKeyID)
-	cfg.Backup.R2SecretAccessKey = resolveEnv(cfg.Backup.R2SecretAccessKey)
+// ResolveBackupEnv replaces env vars in backup config (for secrets).
+func ResolveBackupEnv() {
+	Cfg.Backup.R2AccessKeyID = ResolveEnv(Cfg.Backup.R2AccessKeyID)
+	Cfg.Backup.R2SecretAccessKey = ResolveEnv(Cfg.Backup.R2SecretAccessKey)
 }
 
-// configFilePath determines where to read config from.
-func configFilePath() string {
+// ConfigFilePath determines where to read config from.
+func ConfigFilePath() string {
 	// CLI --config overrides
 	for i := 2; i < len(os.Args); i++ {
 		if os.Args[i] == "--config" && i+1 < len(os.Args) {
 			return os.Args[i+1]
 		}
 	}
-	return filepath.Join(ensureDataDir(), "config.json")
+	return filepath.Join(EnsureDataDir(), "config.json")
 }
 
-// applyCLIOverrides applies CLI args on top of loaded config.
-func applyCLIOverrides() {
+// ApplyCLIOverrides applies CLI args on top of loaded config.
+func ApplyCLIOverrides() {
 	// We use the same arg loop as cmdServe, setting cfg fields from CLI.
 	for i := 2; i < len(os.Args); i++ {
 		switch os.Args[i] {
 		case "--domain":
 			if i+1 < len(os.Args) {
-				cfg.Domain = os.Args[i+1]
+				Cfg.Domain = os.Args[i+1]
 				i++
 			}
 		case "--port":
 			if i+1 < len(os.Args) {
-				cfg.Port = os.Args[i+1]
+				Cfg.Port = os.Args[i+1]
 				i++
 			}
 		case "--tls-cert":
 			if i+1 < len(os.Args) {
-				cfg.TLSCert = os.Args[i+1]
+				Cfg.TLSCert = os.Args[i+1]
 				i++
 			}
 		case "--tls-key":
 			if i+1 < len(os.Args) {
-				cfg.TLSKey = os.Args[i+1]
+				Cfg.TLSKey = os.Args[i+1]
 				i++
 			}
 		case "--config":
 			if i+1 < len(os.Args) {
 				i++
-			} // already consumed by configFilePath
+			} // already consumed by ConfigFilePath
 		}
 	}
+}
+
+var dataDir string
+
+func EnsureDataDir() string {
+	if dataDir == "" {
+		dataDir = os.Getenv("LXC_DATA_DIR")
+		if dataDir == "" {
+			dataDir = "/var/lib/clever-vpn-lxc"
+		}
+		os.MkdirAll(dataDir, 0700)
+	}
+	return dataDir
+}
+
+var syncQueue = map[string]bool{}
+
+func TriggerSync(filename string) {
+	syncQueue[filename] = true
 }
