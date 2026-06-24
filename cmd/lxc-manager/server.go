@@ -1319,10 +1319,12 @@ func handleNodeAdd(w http.ResponseWriter, r *http.Request) {
 		MaxContainers int    `json:"maxContainers,string"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		log.Printf("Node add: invalid body: %v", err)
 		jsonError(w, "invalid body", 400)
 		return
 	}
 	if req.Name == "" || req.Region == "" || req.SSHHost == "" || req.SSHPassword == "" {
+		log.Printf("Node add: missing required fields (name=%q region=%q host=%q)", req.Name, req.Region, req.SSHHost)
 		jsonError(w, "name, region, sshHost, sshPassword required", 400)
 		return
 	}
@@ -1332,6 +1334,7 @@ func handleNodeAdd(w http.ResponseWriter, r *http.Request) {
 
 	rec, err := provisionNode(req.Name, req.Region, req.SSHHost, req.SSHPort, req.SSHPassword, req.PoolSize)
 	if err != nil {
+		log.Printf("Node add: provision failed: %v", err)
 		jsonError(w, fmt.Sprintf("provision: %v", err), 500)
 		return
 	}
