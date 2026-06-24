@@ -721,9 +721,19 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cli := clientForInstance(name)
+	if cli == nil {
+		// Node gone — clean up instance record only
+		log.Printf("  container %s has no node, cleaning registry only", name)
+		unregisterInstance(name)
+		jsonOK(w, map[string]string{"status": "deleted"})
+		return
+	}
 	container, err := cli.GetContainer(name)
 	if err != nil {
-		jsonError(w, fmt.Sprintf("get: %v", err), 404)
+		// Container not found on node — clean registry
+		log.Printf("  container %s not found on node, cleaning registry only", name)
+		unregisterInstance(name)
+		jsonOK(w, map[string]string{"status": "deleted"})
 		return
 	}
 
@@ -765,6 +775,10 @@ func handleStart(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cli := clientForInstance(name)
+	if cli == nil {
+		jsonError(w, "node unavailable", 503)
+		return
+	}
 	if err := cli.StartContainer(name); err != nil {
 		jsonError(w, fmt.Sprintf("start: %v", err), 500)
 		return
@@ -790,6 +804,10 @@ func handleStop(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cli := clientForInstance(name)
+	if cli == nil {
+		jsonError(w, "node unavailable", 503)
+		return
+	}
 	if err := cli.StopContainer(name); err != nil {
 		jsonError(w, fmt.Sprintf("stop: %v", err), 500)
 		return
@@ -815,6 +833,10 @@ func handleRestart(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cli := clientForInstance(name)
+	if cli == nil {
+		jsonError(w, "node unavailable", 503)
+		return
+	}
 	// Restart = stop + start
 	if err := cli.StopContainer(name); err != nil {
 		jsonError(w, fmt.Sprintf("stop: %v", err), 500)
@@ -928,7 +950,12 @@ func handleResize(w http.ResponseWriter, r *http.Request) {
 	saveInstances()
 	instMu.Unlock()
 
-	if err := clientForInstance(name).ResizeContainer(name, rec.CPU, rec.Mem, rec.Disk); err != nil {
+	cli := clientForInstance(name)
+	if cli == nil {
+		jsonError(w, "node unavailable", 503)
+		return
+	}
+	if err := cli.ResizeContainer(name, rec.CPU, rec.Mem, rec.Disk); err != nil {
 		jsonError(w, fmt.Sprintf("resize: %v", err), 500)
 		return
 	}
@@ -1051,6 +1078,10 @@ func handleAdminStartContainer(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[Admin] Starting container %s", name)
 	cli := clientForInstance(name)
+	if cli == nil {
+		jsonError(w, "node unavailable", 503)
+		return
+	}
 	if err := cli.StartContainer(name); err != nil {
 		jsonError(w, fmt.Sprintf("start: %v", err), 500)
 		return
@@ -1076,6 +1107,10 @@ func handleAdminStopContainer(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[Admin] Stopping container %s", name)
 	cli := clientForInstance(name)
+	if cli == nil {
+		jsonError(w, "node unavailable", 503)
+		return
+	}
 	if err := cli.StopContainer(name); err != nil {
 		jsonError(w, fmt.Sprintf("stop: %v", err), 500)
 		return
@@ -1101,6 +1136,10 @@ func handleAdminRestartContainer(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[Admin] Restarting container %s", name)
 	cli := clientForInstance(name)
+	if cli == nil {
+		jsonError(w, "node unavailable", 503)
+		return
+	}
 	if err := cli.StopContainer(name); err != nil {
 		jsonError(w, fmt.Sprintf("stop: %v", err), 500)
 		return
@@ -1150,7 +1189,12 @@ func handleAdminResizeContainer(w http.ResponseWriter, r *http.Request) {
 	instMu.Unlock()
 
 	log.Printf("[Admin] Resizing container %s: cpu=%d mem=%d disk=%d", name, rec.CPU, rec.Mem, rec.Disk)
-	if err := clientForInstance(name).ResizeContainer(name, rec.CPU, rec.Mem, rec.Disk); err != nil {
+	cli := clientForInstance(name)
+	if cli == nil {
+		jsonError(w, "node unavailable", 503)
+		return
+	}
+	if err := cli.ResizeContainer(name, rec.CPU, rec.Mem, rec.Disk); err != nil {
 		jsonError(w, fmt.Sprintf("resize: %v", err), 500)
 		return
 	}
@@ -1381,6 +1425,11 @@ func handleUserRename(w http.ResponseWriter, r *http.Request) {
 // Must NOT hold instMu lock when calling.
 func destroyContainer(name string) {
 	cli := clientForInstance(name)
+	if cli == nil {
+		log.Printf("  container %s has no node, cleaning registry only", name)
+		unregisterInstance(name)
+		return
+	}
 	container, err := cli.GetContainer(name)
 	if err != nil {
 		log.Printf("  container %s not found, cleaning registry only", name)
@@ -1505,6 +1554,14 @@ func corsHandler(next http.HandlerFunc) http.HandlerFunc {
 			w.WriteHeader(204)
 			return
 		}
+
+		// Recover from panics to ensure CORS headers are always sent
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Printf("PANIC: %v", rec)
+				jsonError(w, "internal server error", 500)
+			}
+		}()
 
 		next(w, r)
 	}
