@@ -11,8 +11,9 @@ import (
 const (
 	healthHealthy   = "healthy"
 	healthUnhealthy = "unhealthy"
-	healthLost      = "lost"
+	healthLost      = "lost"    // node removed, container has no node
 	healthStopped   = "stopped"
+	healthFailed    = "failed"  // auto-recovery failed, needs admin intervention
 )
 
 var (
@@ -204,7 +205,7 @@ func recoverMissingContainer(rec *InstanceRecord) {
 	cli, err := getNodeClient(rec.Node)
 	if err != nil {
 		log.Printf("Auto-recovery %s: cannot connect to node %s: %v", rec.Name, rec.Node, err)
-		setHealth(rec.Name, healthLost, fmt.Sprintf("auto-recovery failed: %v", err))
+		setHealth(rec.Name, healthFailed, fmt.Sprintf("auto-recovery failed: %v", err))
 		return
 	}
 
@@ -220,13 +221,13 @@ func recoverMissingContainer(rec *InstanceRecord) {
 	if err := cli.CreateContainer(rec.Name, img, net, rec.StaticIP, rec.CPU, rec.Mem, rec.Disk,
 		map[string]string{"cloud-init.user-data": cloudConfig}); err != nil {
 		log.Printf("Auto-recovery %s: create failed: %v", rec.Name, err)
-		setHealth(rec.Name, healthLost, fmt.Sprintf("auto-recovery create failed: %v", err))
+		setHealth(rec.Name, healthFailed, fmt.Sprintf("auto-recovery create failed: %v", err))
 		return
 	}
 
 	if err := cli.StartContainer(rec.Name); err != nil {
 		log.Printf("Auto-recovery %s: start failed: %v", rec.Name, err)
-		setHealth(rec.Name, healthLost, fmt.Sprintf("auto-recovery start failed: %v", err))
+		setHealth(rec.Name, healthFailed, fmt.Sprintf("auto-recovery start failed: %v", err))
 		return
 	}
 
