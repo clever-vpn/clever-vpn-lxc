@@ -68,13 +68,9 @@ install_lxd() {
 init_lxd() {
     local pool_size="${STORAGE_POOL_SIZE:-10}"
 
-    # Idempotent: if default storage pool AND vpnbr0 network already exist, skip.
-    if lxc storage show default &>/dev/null 2>&1 && lxc network show vpnbr0 &>/dev/null 2>&1; then
-        log_info "LXD already initialized (storage + network exist), skipping."
-        return 0
-    fi
+    log_info "Initializing LXD with btrfs (${pool_size}GiB loop)..."
 
-    # Clean up any partial previous LXD initialization before re-creating.
+    # Always clean up before re-creating
     if lxc storage show default &>/dev/null 2>&1; then
         log_info "Removing existing storage pool 'default'..."
         lxc profile device remove default root 2>/dev/null || true
@@ -282,6 +278,22 @@ setup_iptables_persist() {
     apt-get install -y iptables-persistent
 }
 
+# ==================== 环境清理 ====================
+# Ensure a clean starting point regardless of previous state.
+cleanup_containers() {
+    log_info "Removing all existing LXD containers..."
+    lxc list --format csv -c n 2>/dev/null | while read c; do
+        [[ -n "$c" ]] && lxc delete "$c" --force 2>/dev/null || true
+    done
+}
+
+cleanup_iptables() {
+    log_info "Flushing all DNAT rules..."
+    iptables -t nat -F PREROUTING 2>/dev/null || true
+    iptables -t nat -F POSTROUTING 2>/dev/null || true
+    iptables -t nat -F OUTPUT 2>/dev/null || true
+}
+
 # ==================== LXD HTTPS / Manager trust ====================
 MANAGER_CERT="${MANAGER_CERT:-}"
 
@@ -328,6 +340,8 @@ main() {
     check_ubuntu
     check_kernel
     install_lxd
+    cleanup_containers
+    cleanup_iptables
     init_lxd
     setup_network
     setup_ufw
