@@ -73,6 +73,29 @@ type APIError struct {
 	Error string `json:"error"`
 }
 
+// flexInt unmarshals both JSON numbers (22) and quoted strings ("22").
+type flexInt int
+
+func (f *flexInt) UnmarshalJSON(b []byte) error {
+	// Try bare number first
+	var n int
+	if err := json.Unmarshal(b, &n); err == nil {
+		*f = flexInt(n)
+		return nil
+	}
+	// Try quoted string
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return fmt.Errorf("flexInt: expected number or string, got %s", string(b))
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return fmt.Errorf("flexInt: invalid number %q", s)
+	}
+	*f = flexInt(n)
+	return nil
+}
+
 // ==================== Instance Registry ====================
 
 type InstanceRecord struct {
@@ -1311,13 +1334,13 @@ func handleAdminResizeContainer(w http.ResponseWriter, r *http.Request) {
 
 func handleNodeAdd(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name          string `json:"name"`
-		Region        string `json:"region"`
-		SSHHost       string `json:"sshHost"`
-		SSHPort       int    `json:"sshPort,string"`
-		SSHPassword   string `json:"sshPassword"`
-		PoolSize      string `json:"poolSize"`
-		MaxContainers int    `json:"maxContainers,string"`
+		Name          string      `json:"name"`
+		Region        string      `json:"region"`
+		SSHHost       string      `json:"sshHost"`
+		SSHPort       flexInt     `json:"sshPort"`
+		SSHPassword   string      `json:"sshPassword"`
+		PoolSize      string      `json:"poolSize"`
+		MaxContainers flexInt     `json:"maxContainers"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		log.Printf("Node add: invalid body: %v", err)
@@ -1333,14 +1356,14 @@ func handleNodeAdd(w http.ResponseWriter, r *http.Request) {
 		req.SSHPort = 22
 	}
 
-	rec, err := provisionNode(req.Name, req.Region, req.SSHHost, req.SSHPort, req.SSHPassword, req.PoolSize)
+	rec, err := provisionNode(req.Name, req.Region, req.SSHHost, int(req.SSHPort), req.SSHPassword, req.PoolSize)
 	if err != nil {
 		log.Printf("Node add: provision failed: %v", err)
 		jsonError(w, fmt.Sprintf("provision: %v", err), 500)
 		return
 	}
 	if req.MaxContainers > 0 {
-		rec.MaxContainers = req.MaxContainers
+		rec.MaxContainers = int(req.MaxContainers)
 	}
 
 	if err := addNode(rec); err != nil {
@@ -1414,15 +1437,20 @@ func handleNodeUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Status        *string `json:"status"`
-		MaxContainers *int    `json:"maxContainers,string"`
+		Status        *string  `json:"status"`
+		MaxContainers flexInt  `json:"maxContainers"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "invalid body", 400)
 		return
 	}
 
-	if err := updateNodeConfig(nodeID, req.Status, req.MaxContainers); err != nil {
+	var maxContainers *int
+	if req.MaxContainers > 0 {
+		v := int(req.MaxContainers)
+		maxContainers = &v
+	}
+	if err := updateNodeConfig(nodeID, req.Status, maxContainers); err != nil {
 		jsonError(w, err.Error(), 404)
 		return
 	}
