@@ -267,6 +267,10 @@ func rebuildNode(nodeID string) error {
 		return fmt.Errorf("node %s not found", nodeID)
 	}
 
+	if n.Status == "rebuilding" || n.Status == "creating" {
+		return fmt.Errorf("node %s is already %s", nodeID, n.Status)
+	}
+
 	setNodeStatus(nodeID, "rebuilding", "administrator requested rebuild")
 
 	// SSH to the node and run the idempotent node-setup.sh
