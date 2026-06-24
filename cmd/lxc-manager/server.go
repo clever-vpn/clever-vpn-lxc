@@ -1484,9 +1484,10 @@ func handleNodeUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		MaxContainers flexInt  `json:"maxContainers"`
-		SSHPassword   *string  `json:"sshPassword"`
-		SSHPort       flexInt  `json:"sshPort"`
+		MaxContainers flexInt     `json:"maxContainers"`
+		SSHPassword   *string     `json:"sshPassword"`
+		SSHPort       flexInt     `json:"sshPort"`
+		PoolSize      flexString  `json:"poolSize"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "invalid body", 400)
@@ -1503,7 +1504,12 @@ func handleNodeUpdate(w http.ResponseWriter, r *http.Request) {
 		v := int(req.SSHPort)
 		sshPort = &v
 	}
-	if err := updateNodeConfig(nodeID, maxContainers, req.SSHPassword, sshPort); err != nil {
+	var poolSize *string
+	if req.PoolSize != "" {
+		v := string(req.PoolSize)
+		poolSize = &v
+	}
+	if err := updateNodeConfig(nodeID, maxContainers, req.SSHPassword, sshPort, poolSize); err != nil {
 		jsonError(w, err.Error(), 404)
 		return
 	}
