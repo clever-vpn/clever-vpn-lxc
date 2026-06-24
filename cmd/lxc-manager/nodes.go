@@ -174,9 +174,7 @@ func pickNode(region string) (string, *lxc.Client, error) {
 	var bestID string
 	bestCount := -1
 	for _, id := range ids {
-		nodesMu.Lock()
 		n := nodes[id]
-		nodesMu.Unlock()
 		if n == nil || n.Status != "active" {
 			continue // skip inactive nodes
 		}
