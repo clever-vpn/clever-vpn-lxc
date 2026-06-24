@@ -385,6 +385,7 @@ func delPortForward(nodeID string, extPort int, dstIP string, dstPort int) {
 // ==================== HTTP Helpers ====================
 
 func jsonError(w http.ResponseWriter, msg string, code int) {
+	log.Printf("ERROR %d: %s", code, msg)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(APIError{Error: msg})
