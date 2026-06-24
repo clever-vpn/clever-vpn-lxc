@@ -289,8 +289,8 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 
 #### `POST /api/nodes` — 添加节点
 
-添加节点时自动执行孤儿清理：删除节点上不属于注册表的容器。
-同时恢复同 IP 的历史容器（灾难恢复）。
+异步接口：立即返回后，后台通过 SSH 初始化 LXD。
+前端轮询 `GET /api/nodes` 查看状态变化：`creating` → `active` 或 `degraded`。
 
 **请求头**：`Authorization: Bearer <admin-token>`
 ```json
@@ -309,7 +309,7 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 |------|------|------|------|
 | `name` | string | ✅ | 人类可读名称，必须唯一 |
 | `region` | string | ✅ | 区域 ID（如 `nrt`） |
-| `sshHost` | string | ✅ | LXD 宿主机 IP |
+| `sshHost` | string | ✅ | LXD 宿主机 IP，同 IP 只能注册一个节点 |
 | `sshPassword` | string | ✅ | root 密码 |
 | `sshPort` | int | ❌ | SSH 端口（默认 22） |
 | `poolSize` | string | ❌ | btrfs 存储池大小（GiB），默认 10 |
@@ -318,11 +318,10 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 **响应** `200`：
 ```json
 {
-  "status": "ready",
+  "status": "creating",
   "id": "nd_abc123",
   "name": "vultr-nrt",
-  "region": "nrt",
-  "url": "https://192.168.1.10:8443"
+  "region": "nrt"
 }
 ```
 
@@ -362,26 +361,33 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 | `sshPort` | int | SSH 端口 |
 | `image` | string | 基础镜像别名 |
 | `poolSize` | string | btrfs 存储池大小 |
-| `status` | string | `active` / `degraded` / `offline` / `rebuilding` |
+| `status` | string | `creating` / `active` / `rebuilding` / `degraded` / `offline` |
 | `statusReason` | string | 状态原因（非正常状态时） |
 | `maxContainers` | int | 最大容器数，0 = 不限制 |
 
 #### `PUT /api/nodes/{id}` — 更新节点配置
+
+仅支持修改连接参数和容量配置。不可修改 `name`、`region`、`sshHost`（关联业务逻辑）。
+`status` 由系统自动管理，不可手动设置。
 
 **请求头**：`Authorization: Bearer <admin-token>`
 
 **请求体**（所有字段可选）：
 ```json
 {
-  "status": "active",
-  "maxContainers": 10
+  "maxContainers": 20,
+  "sshPassword": "newPassword",
+  "sshPort": 2222,
+  "poolSize": "15"
 }
 ```
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `status` | string | 手动设置状态：`active` / `degraded` / `offline` |
 | `maxContainers` | int | 最大容器数，0 = 不限制 |
+| `sshPassword` | string | SSH 密码（重装系统后更新） |
+| `sshPort` | int | SSH 端口 |
+| `poolSize` | string | btrfs 存储池大小（GiB） |
 
 **响应** `200`：
 ```json
@@ -390,7 +396,8 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 
 #### `POST /api/nodes/{id}/rebuild` — 重建节点
 
-重新初始化节点 LXD 配置，恢复该节点上的所有容器。
+清空节点上所有容器和 DNAT 规则，重新初始化 LXD，然后从 `instances.json` 全量恢复容器。
+节点状态变化：`rebuilding` → `active`（全部成功）或 `degraded`（部分失败）。
 
 **请求头**：`Authorization: Bearer <admin-token>`
 
