@@ -2219,12 +2219,12 @@ SystemMaxUse=100M
 MaxRetentionSec=3day
 `
 	// Fix broken PS1 left by old base image directly in /etc/bash.bashrc.
-	// /etc/profile.d is NOT sourced for non-login shells (lxc exec creates non-login shell).
+	// Use bootcmd instead of runcmd to avoid overwriting user's runcmd section.
 	return fmt.Sprintf(
 		"hostname: %s\npreserve_hostname: false\nwrite_files:\n"+
 			"  - path: /etc/clever-vpn/bootstrap.env\n    permissions: '0600'\n    owner: root:root\n    content: |\n%s\n"+
 			"  - path: /etc/systemd/journald.conf.d/50-limit.conf\n    permissions: '0644'\n    owner: root:root\n    content: |\n%s\n"+
-			"\nruncmd:\n"+
+			"\nbootcmd:\n"+
 			"  - sed -i '/^export PS1=/d' /etc/bash.bashrc\n"+
 			"  - |\n      echo 'export PS1=\"\\[\\e[1;32m\\]root@clever-vpn\\[\\e[0m\\]:\\w# \"' >> /etc/bash.bashrc",
 		hostname, indent(bootstrapContent, "      "), indent(journaldConf, "      "))
