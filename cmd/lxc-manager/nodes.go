@@ -234,7 +234,7 @@ func setNodeStatus(nodeID, status, reason string) {
 }
 
 // updateNodeConfig updates the mutable fields of a node (status, maxContainers).
-func updateNodeConfig(nodeID string, status *string, maxContainers *int) error {
+func updateNodeConfig(nodeID string, status *string, maxContainers *int, sshPassword *string) error {
 	nodesMu.Lock()
 	defer nodesMu.Unlock()
 
@@ -247,6 +247,9 @@ func updateNodeConfig(nodeID string, status *string, maxContainers *int) error {
 	}
 	if maxContainers != nil {
 		n.MaxContainers = *maxContainers
+	}
+	if sshPassword != nil {
+		n.SSHPassword = *sshPassword
 	}
 	saveNodes()
 	return nil
