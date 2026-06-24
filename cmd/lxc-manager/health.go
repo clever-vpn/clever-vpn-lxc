@@ -41,6 +41,9 @@ func checkAllContainers() {
 	// Check node health first — container health depends on it.
 	checkAllNodes()
 
+	// Restore DNAT rules on all active nodes (iptables lost after reboot)
+	syncAllDNAT()
+
 	instMu.Lock()
 	names := make([]string, 0, len(instances))
 	for name := range instances {
@@ -241,4 +244,39 @@ func recoverMissingContainer(rec *InstanceRecord) {
 		setHealth(rec.Name, healthHealthy, "")
 		log.Printf("Auto-recovery: %s restored successfully", rec.Name)
 	}()
+}
+
+// syncAllDNAT restores port forwarding rules for all containers on active nodes.
+// Called periodically to recover rules lost after node reboot (iptables is ephemeral).
+func syncAllDNAT() {
+	instMu.Lock()
+	defer instMu.Unlock()
+
+	for _, rec := range instances {
+		if rec.Node == "" || rec.StaticIP == "" {
+			continue
+		}
+
+		nodesMu.Lock()
+		n, ok := nodes[rec.Node]
+		nodesMu.Unlock()
+		if !ok || n.Status != "active" {
+			continue // node not active yet, skip
+		}
+
+		cli, err := getNodeClient(rec.Node)
+		if err != nil {
+			continue
+		}
+
+		// Check if the container exists
+		_, err = cli.GetContainer(rec.Name)
+		if err != nil {
+			continue // container not in LXD yet, skip
+		}
+
+		// Restore DNAT (idempotent — addPortForward checks existing rules)
+		addPortForward(rec.Node, rec.SSHExtPort, rec.StaticIP, 22)
+		addPortForward(rec.Node, rec.ServiceExtPort, rec.StaticIP, rec.ServicePort)
+	}
 }
