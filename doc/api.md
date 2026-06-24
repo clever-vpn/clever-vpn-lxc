@@ -290,27 +290,30 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 #### `POST /api/nodes` — 添加节点
 
 添加节点时自动执行孤儿清理：删除节点上不属于注册表的容器。
+同时恢复同 IP 的历史容器（灾难恢复）。
 
 **请求头**：`Authorization: Bearer <admin-token>`
 ```json
 {
-  "name":        "vultr-nrt",
-  "region":      "nrt",
-  "sshHost":     "192.168.1.10",
-  "sshPort":     22,
-  "sshPassword": "password",
-  "poolSize":    "10"
+  "name":          "vultr-nrt",
+  "region":        "nrt",
+  "sshHost":       "192.168.1.10",
+  "sshPort":       22,
+  "sshPassword":   "password",
+  "poolSize":      "10",
+  "maxContainers": 5
 }
 ```
 
-| 字段 | 说明 |
-|------|------|
-| `name` | 人类可读名称，必须唯一 |
-| `region` | 区域 ID（如 `nrt`） |
-| `sshHost` | LXD 宿主机 IP |
-| `sshPort` | SSH 端口（默认 22） |
-| `sshPassword` | root 密码 |
-| `poolSize` | **新增** btrfs 存储池大小（GiB），默认 10 |
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `name` | string | ✅ | 人类可读名称，必须唯一 |
+| `region` | string | ✅ | 区域 ID（如 `nrt`） |
+| `sshHost` | string | ✅ | LXD 宿主机 IP |
+| `sshPassword` | string | ✅ | root 密码 |
+| `sshPort` | int | ❌ | SSH 端口（默认 22） |
+| `poolSize` | string | ❌ | btrfs 存储池大小（GiB），默认 10 |
+| `maxContainers` | int | ❌ | 最大容器数限制，0 = 不限制 |
 
 **响应** `200`：
 ```json
@@ -319,14 +322,82 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
   "id": "nd_abc123",
   "name": "vultr-nrt",
   "region": "nrt",
-  "url": "https://192.168.1.10:8443",
-  "poolSize": "10"
+  "url": "https://192.168.1.10:8443"
 }
 ```
 
 #### `GET /api/nodes` — 列出所有节点
 
 **请求头**：`Authorization: Bearer <admin-token>`
+
+**响应** `200`：
+```json
+[
+  {
+    "id": "nd_abc123",
+    "name": "vultr-nrt",
+    "region": "nrt",
+    "url": "https://192.168.1.10:8443",
+    "network": "vpnbr0",
+    "sshHost": "192.168.1.10",
+    "sshPort": 22,
+    "sshPassword": "password",
+    "image": "clever-vpn-base",
+    "poolSize": "10",
+    "status": "active",
+    "statusReason": "",
+    "maxContainers": 5
+  }
+]
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `id` | string | 节点唯一标识 |
+| `name` | string | 节点名称 |
+| `region` | string | 所属区域 |
+| `url` | string | LXD API 地址 |
+| `network` | string | 容器网络桥名称 |
+| `sshHost` | string | SSH 主机地址 |
+| `sshPort` | int | SSH 端口 |
+| `image` | string | 基础镜像别名 |
+| `poolSize` | string | btrfs 存储池大小 |
+| `status` | string | `active` / `degraded` / `offline` / `rebuilding` |
+| `statusReason` | string | 状态原因（非正常状态时） |
+| `maxContainers` | int | 最大容器数，0 = 不限制 |
+
+#### `PUT /api/nodes/{id}` — 更新节点配置
+
+**请求头**：`Authorization: Bearer <admin-token>`
+
+**请求体**（所有字段可选）：
+```json
+{
+  "status": "active",
+  "maxContainers": 10
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `status` | string | 手动设置状态：`active` / `degraded` / `offline` |
+| `maxContainers` | int | 最大容器数，0 = 不限制 |
+
+**响应** `200`：
+```json
+{ "nodeID": "nd_abc123", "status": "updated" }
+```
+
+#### `POST /api/nodes/{id}/rebuild` — 重建节点
+
+重新初始化节点 LXD 配置，恢复该节点上的所有容器。
+
+**请求头**：`Authorization: Bearer <admin-token>`
+
+**响应** `200`：
+```json
+{ "status": "rebuilding", "nodeID": "nd_abc123" }
+```
 
 #### `GET /api/nodes/{id}/containers` — 节点上所有容器
 

@@ -138,6 +138,43 @@ func freeStaticIP(nodeID, ip string) {
 	}
 }
 
+// syncIPPoolFromLXD scans all LXD containers on all nodes and marks their
+// static IPs as used. This prevents re-assigning IPs that are still in use
+// by orphan containers (exist in LXD but not in the Manager registry).
+func syncIPPoolFromLXD() {
+	ipMu.Lock()
+	defer ipMu.Unlock()
+
+	for nodeID := range nodes {
+		cli, err := getNodeClientLocked(nodeID)
+		if err != nil {
+			continue
+		}
+		containers, err := cli.ListContainers(env("LXC_NAME_PREFIX", "user-"))
+		if err != nil {
+			continue
+		}
+		for _, c := range containers {
+			// Get the container's IP on the VPN network
+			vip, err := cli.InstanceIPv4(c.Name, 2*time.Second)
+			if err != nil || vip == "" || !strings.HasPrefix(vip, ipBase) {
+				continue
+			}
+			suffix, err := strconv.Atoi(strings.TrimPrefix(vip, ipBase))
+			if err != nil || suffix < ipStart || suffix > ipMax {
+				continue
+			}
+			if usedIPs[nodeID] == nil {
+				usedIPs[nodeID] = map[int]bool{}
+			}
+			if !usedIPs[nodeID][suffix] {
+				usedIPs[nodeID][suffix] = true
+				log.Printf("IP sync: %s (%s) marked as used on node %s", vip, c.Name, nodeID)
+			}
+		}
+	}
+}
+
 const (
 	sshPortBase     = 22000
 	sshPortMax      = 22999
@@ -191,6 +228,9 @@ func loadInstances() {
 		}
 	}
 	log.Printf("Loaded %d instance(s)", len(instances))
+
+	// Sync IP pool from LXD to avoid re-assigning IPs still in use by orphan containers
+	syncIPPoolFromLXD()
 }
 
 func saveInstances() {
@@ -386,7 +426,7 @@ func recoverInstances() {
 			}
 		}
 
-	// Use static IP if available, otherwise poll
+		// Use static IP if available, otherwise poll
 		vip := rec.StaticIP
 		if vip == "" {
 			var err error
