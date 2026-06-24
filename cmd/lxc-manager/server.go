@@ -1484,7 +1484,6 @@ func handleNodeUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Status        *string  `json:"status"`
 		MaxContainers flexInt  `json:"maxContainers"`
 		SSHPassword   *string  `json:"sshPassword"`
 	}
@@ -1498,7 +1497,7 @@ func handleNodeUpdate(w http.ResponseWriter, r *http.Request) {
 		v := int(req.MaxContainers)
 		maxContainers = &v
 	}
-	if err := updateNodeConfig(nodeID, req.Status, maxContainers, req.SSHPassword); err != nil {
+	if err := updateNodeConfig(nodeID, maxContainers, req.SSHPassword); err != nil {
 		jsonError(w, err.Error(), 404)
 		return
 	}
