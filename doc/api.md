@@ -205,18 +205,26 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 | `userData` | string | ❌ | cloud-init user-data；为空时自动生成密码 |
 | `label` | string | ❌ | 自定义管理标签，可用于后续查询分组 |
 
-**响应** `200`：
+**响应** `200`：返回完整的容器记录，字段与 `instances.json` 一致：
 ```json
 {
-  "status": "creating",
   "id": "user-a1b2c3d4",
-  "password": "Abc123Xyz",
   "cpu": 1,
   "mem": 512,
   "disk": 10,
+  "servicePort": 8080,
+  "sshExtPort": 22001,
+  "serviceExtPort": 50001,
+  "userID": "u_a1b2c3d4e5f6",
+  "password": "Abc123Xyz",
   "nodeID": "nd_abc123",
+  "region": "nrt",
   "publicIP": "203.0.113.5",
-  "ports": { "ssh": 22001, "service": 50001 }
+  "created": "2026-06-24T09:00:00Z",
+  "state": "creating",
+  "terminalUrl": "https://lxc-api.clever-clouds.com/terminal/user-a1b2c3d4",
+  "label": "",
+  "userData": ""
 }
 ```
 
@@ -226,7 +234,7 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 
 **请求头**：`Authorization: Bearer <user-token>`
 
-**响应** `200`：容器列表，包含 `terminalUrl`、`state`、`region`、`nodeID`、`publicIP` 和 `label` 字段。
+**响应** `200`：容器列表，每个元素为完整的容器记录。
 
 ### `GET /api/containers/{id}` — 获取容器详情
 
@@ -234,23 +242,28 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 
 **请求头**：`Authorization: Bearer <user-token>`
 
-**响应** `200`：
+**响应** `200`：返回完整的容器记录：
 ```json
 {
   "id": "user-a1b2c3d4",
+  "cpu": 1,
+  "mem": 512,
+  "disk": 10,
+  "servicePort": 8080,
+  "sshExtPort": 22001,
+  "serviceExtPort": 50001,
+  "userID": "u_a1b2c3d4e5f6",
+  "password": "Abc123Xyz",
+  "nodeID": "nd_abc123",
+  "region": "nrt",
+  "publicIP": "203.0.113.5",
+  "created": "2026-06-24T09:00:00Z",
   "state": "running",
   "terminalUrl": "https://lxc-api.clever-clouds.com/terminal/user-a1b2c3d4",
-  "region": "nrt",
-  "nodeID": "nd_abc123",
-  "publicIP": "203.0.113.5",
-  "...": "..."
+  "label": "",
+  "userData": ""
 }
 ```
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `state` | string | 容器状态，见[容器状态](#容器状态) |
-| `stateReason` | string | 状态原因（非 `running` 时出现） |
 
 ### `POST /api/containers/{id}/start` — 启动容器
 
@@ -536,17 +549,7 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 
 **请求头**：`Authorization: Bearer <admin-token>`
 
-**响应** `200`：
-```json
-{
-  "id": "my-container",
-  "state": "running",
-  "region": "nrt",
-  "nodeID": "nd_abc123",
-  "publicIP": "1.2.3.4",
-  "terminalUrl": "https://lxc-api.clever-clouds.com/terminal/my-container"
-}
-```
+**响应** `200`：返回完整的容器记录（格式同上）。
 
 ---
 
