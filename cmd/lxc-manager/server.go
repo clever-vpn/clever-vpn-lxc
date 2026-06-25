@@ -402,6 +402,7 @@ func registerInstance(name string, rec *InstanceRecord) error {
 	rec.ServiceExtPort = svc
 	rec.Created = time.Now().UTC()
 	instances[name] = rec
+	log.Printf("AUDIT: register %s (user=%s node=%s state=%s)", name, rec.UserID, rec.Node, rec.State)
 	saveInstances()
 	saveCursors()
 	return nil
@@ -412,7 +413,7 @@ func unregisterInstance(name string) {
 	defer instMu.Unlock()
 
 	if r, ok := instances[name]; ok {
-		// Recycle ports (user-facing), but not IP (internal, never recycled).
+		log.Printf("AUDIT: unregister %s (user=%s node=%s state=%s)", name, r.UserID, r.Node, r.State)
 		delete(usedSSH, r.SSHExtPort)
 		delete(usedSvc, r.ServiceExtPort)
 		delete(instances, name)

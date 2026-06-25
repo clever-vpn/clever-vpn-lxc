@@ -33,10 +33,21 @@ func startStateCheckLoop() {
 	go func() {
 		time.Sleep(15 * time.Second) // wait for initial startup
 		for {
+			auditDataIntegrity()
 			checkAllContainers()
 			time.Sleep(stateCheckInterval)
 		}
 	}()
+}
+
+func auditDataIntegrity() {
+	instMu.Lock()
+	n := len(instances)
+	instMu.Unlock()
+	nodesMu.Lock()
+	nn := len(nodes)
+	nodesMu.Unlock()
+	log.Printf("AUDIT: integrity %d instances, %d nodes", n, nn)
 }
 
 func checkAllContainers() {
@@ -203,7 +214,7 @@ func setState(name, status, reason string) {
 	instMu.Unlock()
 
 	if prev != status {
-		log.Printf("State: %s → %s (reason: %s)", name, status, reason)
+		log.Printf("AUDIT: state %s %s→%s (%s)", name, prev, status, reason)
 	}
 }
 
