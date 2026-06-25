@@ -2117,9 +2117,9 @@ MaxRetentionSec=3day
 		user += "\nwrite_files:\n" + injectedWriteFiles
 	}
 
-	// Merge runcmd: append our PS1 fix into user's runcmd section
+	// Merge runcmd: insert our PS1 fix into user's runcmd section
 	if strings.Contains(user, "\nruncmd:") {
-		user += injectedRuncmd
+		user = strings.Replace(user, "\nruncmd:", "\nruncmd:\n"+injectedRuncmd, 1)
 	} else {
 		user += "\nruncmd:\n" + strings.TrimRight(injectedRuncmd, "\n")
 	}
