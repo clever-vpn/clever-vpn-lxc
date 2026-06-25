@@ -1041,56 +1041,6 @@ func handlePlans(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func handleResize(w http.ResponseWriter, r *http.Request) {
-	name := stripPrefix(strings.TrimSuffix(r.URL.Path, "/resize"), "/api/containers/")
-
-	ok, userID := validateUser(r)
-	if !ok {
-		jsonError(w, "unauthorized", 401)
-		return
-	}
-
-	var req ResizeReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonError(w, "invalid body", 400)
-		return
-	}
-	if req.CPU <= 0 && req.Mem <= 0 && req.Disk <= 0 {
-		jsonError(w, "cpu, mem, or disk required", 400)
-		return
-	}
-
-	instMu.Lock()
-	rec, exists := instances[name]
-	if !exists || rec.UserID != userID {
-		instMu.Unlock()
-		jsonError(w, "not found", 404)
-		return
-	}
-	if req.CPU > 0 {
-		rec.CPU = req.CPU
-	}
-	if req.Mem > 0 {
-		rec.Mem = req.Mem
-	}
-	if req.Disk > 0 {
-		rec.Disk = req.Disk
-	}
-	saveInstances()
-	instMu.Unlock()
-
-	cli := clientForInstance(name)
-	if cli == nil {
-		jsonError(w, "node unavailable", 503)
-		return
-	}
-	if err := cli.ResizeContainer(name, rec.CPU, rec.Mem, rec.Disk); err != nil {
-		jsonError(w, fmt.Sprintf("resize: %v", err), 500)
-		return
-	}
-	jsonOK(w, map[string]interface{}{"status": "resized", "cpu": rec.CPU, "mem": rec.Mem, "disk": rec.Disk})
-}
-
 // ==================== Admin Container Handlers ====================
 
 // handleAdminCreateContainer creates a container on behalf of a user.
@@ -1265,56 +1215,6 @@ func handleAdminRestartContainer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, map[string]string{"status": "restarted"})
-}
-
-// handleAdminResizeContainer allows admin to resize any container.
-func handleAdminResizeContainer(w http.ResponseWriter, r *http.Request) {
-	name := stripPrefix(strings.TrimSuffix(r.URL.Path, "/resize"), "/api/admin/containers/")
-	if name == "" {
-		jsonError(w, "name required", 400)
-		return
-	}
-
-	var req ResizeReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonError(w, "invalid body", 400)
-		return
-	}
-	if req.CPU <= 0 && req.Mem <= 0 && req.Disk <= 0 {
-		jsonError(w, "cpu, mem, or disk required", 400)
-		return
-	}
-
-	instMu.Lock()
-	rec, exists := instances[name]
-	if !exists {
-		instMu.Unlock()
-		jsonError(w, "not found", 404)
-		return
-	}
-	if req.CPU > 0 {
-		rec.CPU = req.CPU
-	}
-	if req.Mem > 0 {
-		rec.Mem = req.Mem
-	}
-	if req.Disk > 0 {
-		rec.Disk = req.Disk
-	}
-	saveInstances()
-	instMu.Unlock()
-
-	log.Printf("[Admin] Resizing container %s: cpu=%d mem=%d disk=%d", name, rec.CPU, rec.Mem, rec.Disk)
-	cli := clientForInstance(name)
-	if cli == nil {
-		jsonError(w, "node unavailable", 503)
-		return
-	}
-	if err := cli.ResizeContainer(name, rec.CPU, rec.Mem, rec.Disk); err != nil {
-		jsonError(w, fmt.Sprintf("resize: %v", err), 500)
-		return
-	}
-	jsonOK(w, map[string]interface{}{"status": "resized", "cpu": rec.CPU, "mem": rec.Mem, "disk": rec.Disk})
 }
 
 // ==================== Node Handlers ====================
@@ -1926,12 +1826,6 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		handleAdminRestartContainer(w, r)
-	case strings.HasPrefix(p, "/api/admin/containers/") && strings.HasSuffix(p, "/resize") && r.Method == "PUT":
-		if !validateAdmin(r) {
-			jsonError(w, "unauthorized", 401)
-			return
-		}
-		handleAdminResizeContainer(w, r)
 	case strings.HasPrefix(p, "/api/admin/containers/") && strings.HasSuffix(p, "/refresh") && r.Method == "POST":
 		if !validateAdmin(r) {
 			jsonError(w, "unauthorized", 401)
@@ -1955,8 +1849,6 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		handleStop(w, r)
 	case strings.HasPrefix(p, "/api/containers/") && strings.HasSuffix(p, "/restart") && r.Method == "POST":
 		handleRestart(w, r)
-	case strings.HasPrefix(p, "/api/containers/") && strings.HasSuffix(p, "/resize") && r.Method == "PUT":
-		handleResize(w, r)
 	case strings.HasPrefix(p, "/api/containers/") && r.Method == "GET":
 		handleGet(w, r)
 	case strings.HasPrefix(p, "/api/containers/") && r.Method == "DELETE":

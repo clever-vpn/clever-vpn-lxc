@@ -277,22 +277,6 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 
 **请求头**：`Authorization: Bearer <user-token>`
 
-### `PUT /api/containers/{id}/resize` — 调整容器规格
-
-可单独调整 CPU、内存或磁盘，传 0 表示保持不变。
-
-**请求头**：`Authorization: Bearer <user-token>`
-
-**请求体**：
-```json
-{ "cpu": 2, "mem": 2048, "disk": 20 }
-```
-
-**响应** `200`：
-```json
-{ "status": "resized", "cpu": 2, "mem": 2048, "disk": 20 }
-```
-
 ### `DELETE /api/containers/{id}` — 删除容器
 
 停止并删除容器，清理端口转发。
@@ -600,7 +584,6 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 ```
 POST /api/containers  →  创建 LXD 容器 → 分配端口 → 配置 DNAT → 启动 → 返回连接信息
 DELETE /api/containers/{id} → 停止容器 → 清理 DNAT → 删除容器 → 清理注册
-PUT /api/containers/{id}/resize → 在线调整 CPU/内存
 ```
 
 ---
