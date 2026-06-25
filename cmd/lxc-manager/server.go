@@ -2100,6 +2100,7 @@ func containerResponse(rec *InstanceRecord) map[string]interface{} {
 		"terminalUrl":    fmt.Sprintf("https://%s/terminal/%s", cfg.Domain, rec.Name),
 		"label":          rec.Label,
 		"userData":       rec.UserData,
+		"password":       rec.Password,
 	}
 	if rec.StateReason != "" {
 		resp["stateReason"] = rec.StateReason
