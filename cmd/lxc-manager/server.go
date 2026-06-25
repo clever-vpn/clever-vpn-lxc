@@ -2160,42 +2160,32 @@ SystemMaxUse=100M
 MaxRetentionSec=3day
 `
 	// Fix broken PS1 left by old base image directly in /etc/bash.bashrc.
-	// Use bootcmd instead of runcmd to avoid overwriting user's runcmd section.
+	// All injected items are returned as plain YAML entries (no top-level keys)
+	// so mergeUserData can insert them into the user's existing sections.
 	return fmt.Sprintf(
-		"hostname: %s\npreserve_hostname: false\nwrite_files:\n"+
+		"hostname: %s\npreserve_hostname: false\n"+
 			"  - path: /etc/clever-vpn/bootstrap.env\n    permissions: '0600'\n    owner: root:root\n    content: |\n%s\n"+
 			"  - path: /etc/systemd/journald.conf.d/50-limit.conf\n    permissions: '0644'\n    owner: root:root\n    content: |\n%s\n"+
-			"\nbootcmd:\n"+
 			"  - sed -i '/^export PS1=/d' /etc/bash.bashrc\n"+
 			"  - |\n      echo 'export PS1=\"\\[\\e[1;32m\\]root@clever-vpn\\[\\e[0m\\]:\\w# \"' >> /etc/bash.bashrc",
 		hostname, indent(bootstrapContent, "      "), indent(journaldConf, "      "))
 }
 
 func mergeUserData(userSupplied, hostname, bootstrapContent, password string) string {
-	inject := injectBlock(hostname, bootstrapContent)
+	// Build the injected items for write_files (bootstrap.env, journald.conf, PS1 fix)
+	journaldConf := `[Journal]
+SystemMaxUse=100M
+MaxRetentionSec=3day
+`
+	injectedWriteFiles := fmt.Sprintf(
+		"  - path: /etc/clever-vpn/bootstrap.env\n    permissions: '0600'\n    owner: root:root\n    content: |\n%s\n"+
+			"  - path: /etc/systemd/journald.conf.d/50-limit.conf\n    permissions: '0644'\n    owner: root:root\n    content: |\n%s",
+		indent(bootstrapContent, "      "), indent(journaldConf, "      "))
 
-	if strings.TrimSpace(userSupplied) != "" {
-		result := ""
-		if strings.HasPrefix(strings.TrimSpace(userSupplied), "#cloud-config") {
-			result = strings.TrimSpace(userSupplied) + "\n\n# injected by clever-vpn-lxc\n" + inject + "\n"
-		} else {
-			result = "#cloud-config\n" + strings.TrimSpace(userSupplied) + "\n\n" + inject + "\n"
-		}
-		// Always append default root password so it's recorded and accessible
-		result += "ssh_pwauth: true\n" +
-			"disable_root: false\n" +
-			"chpasswd:\n" +
-			"  expire: false\n" +
-			"  users:\n" +
-			"    - name: root\n" +
-			"      password: " + shellQuote(password) + "\n" +
-			"      type: text\n"
-		return result
-	}
+	injectedRuncmd := "  - sed -i '/^export PS1=/d' /etc/bash.bashrc\n" +
+		"  - |\n      echo 'export PS1=\"\\[\\e[1;32m\\]root@clever-vpn\\[\\e[0m\\]:\\w# \"' >> /etc/bash.bashrc\n"
 
-	return "#cloud-config\n" +
-		inject + "\n" +
-		"ssh_pwauth: true\n" +
+	passwordBlock := "ssh_pwauth: true\n" +
 		"disable_root: false\n" +
 		"chpasswd:\n" +
 		"  expire: false\n" +
@@ -2203,4 +2193,44 @@ func mergeUserData(userSupplied, hostname, bootstrapContent, password string) st
 		"    - name: root\n" +
 		"      password: " + shellQuote(password) + "\n" +
 		"      type: text\n"
+
+	if strings.TrimSpace(userSupplied) == "" {
+		// No user data — build full cloud-config from scratch
+		return "#cloud-config\n" +
+			"hostname: " + hostname + "\n" +
+			"preserve_hostname: false\n" +
+			"write_files:\n" + injectedWriteFiles + "\n" +
+			"runcmd:\n" + strings.TrimRight(injectedRuncmd, "\n") + "\n" +
+			passwordBlock
+	}
+
+	// User supplied cloud-config — merge injected items into existing sections
+	user := userSupplied
+	if !strings.HasPrefix(strings.TrimSpace(user), "#cloud-config") {
+		user = "#cloud-config\n" + strings.TrimSpace(user)
+	} else {
+		user = strings.TrimSpace(user)
+	}
+
+	// Inject hostname if not present
+	if !strings.Contains(user, "hostname:") {
+		user += "\nhostname: " + hostname + "\npreserve_hostname: false"
+	}
+
+	// Merge write_files: append our items into user's write_files section
+	if strings.Contains(user, "\nwrite_files:") {
+		user = strings.Replace(user, "\nwrite_files:", "\nwrite_files:\n"+injectedWriteFiles, 1)
+	} else {
+		user += "\nwrite_files:\n" + injectedWriteFiles
+	}
+
+	// Merge runcmd: append our PS1 fix into user's runcmd section
+	if strings.Contains(user, "\nruncmd:") {
+		user += injectedRuncmd
+	} else {
+		user += "\nruncmd:\n" + strings.TrimRight(injectedRuncmd, "\n")
+	}
+
+	user += "\n" + passwordBlock
+	return user
 }
