@@ -52,3 +52,56 @@ Apply these rules when implementing or modifying release workflows and version l
 3. Normalize version input internally, but always publish using the prefixed tag format.
 4. Auto-bump logic should parse the latest release version safely and publish the next version with the `v` prefix.
 5. Duplicate checks should target the normalized publish tag to avoid mixed-prefix conflicts.
+
+## Build & Deploy (Production)
+
+### Step 1: Release via GitHub Actions
+
+After code is merged to `main`, trigger the [Release workflow](https://github.com/clever-vpn/clever-vpn-lxc/actions/workflows/release.yml):
+
+1. Click **Run workflow**
+2. Leave **Version** empty to auto-bump patch (e.g. v1.2.10 to v1.2.11), or specify manually like `v1.3.0`
+
+CI will:
+- Build linux/amd64 and linux/arm64 binaries with `-ldflags "-X main.version=$VERSION"`
+- Generate `.gz` + `.sha256` assets
+- Create git tag and GitHub Release
+
+### Step 2: Upgrade Manager in-place
+
+SSH to the manager server (45.77.16.224) and run the self-update command:
+
+```bash
+ssh root@45.77.16.224
+
+# Upgrade to latest release
+lxc-manager update
+
+# Or a specific version
+lxc-manager update --tag v1.2.11
+
+# Restart service
+systemctl restart lxc-manager
+
+# Verify
+lxc-manager version
+systemctl status lxc-manager --no-pager
+```
+
+`lxc-manager update` downloads the gzipped binary and sha256 from GitHub Releases,
+verifies the checksum, and atomically replaces `/usr/local/bin/lxc-manager`.
+
+### Emergency hotfix (skip release, direct deploy)
+
+Only for urgent fixes:
+
+```bash
+cd /Users/bolinwu/Clever-VPN/Clever-VPN-Server/clever-vpn-lxc
+GOOS=linux GOARCH=amd64 go build ./cmd/lxc-manager/
+ssh root@45.77.16.224 'systemctl stop lxc-manager'
+scp lxc-manager root@45.77.16.224:/usr/local/bin/lxc-manager
+ssh root@45.77.16.224 'systemctl start lxc-manager'
+```
+
+Note: darwin/arm64 binary will fail with "Exec format error" on Linux VPS.
+Always use `GOOS=linux GOARCH=amd64`.
