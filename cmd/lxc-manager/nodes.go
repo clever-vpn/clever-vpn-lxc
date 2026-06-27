@@ -33,6 +33,8 @@ type NodeRecord struct {
 	Status        string `json:"status"`   // "active" | "degraded" | "offline" | "rebuilding"
 	StatusReason  string `json:"statusReason,omitempty"`
 	MaxContainers int    `json:"maxContainers"` // 0 = unlimited
+	IPv4          string `json:"ipv4,omitempty"`
+	IPv6          string `json:"ipv6,omitempty"`
 }
 
 var (
@@ -309,6 +311,18 @@ func rebuildNode(nodeID string) error {
 	sshExec(client, "lxc config set core.https_address :8443 2>/dev/null || true")
 	sshExec(client, "lxc config trust add /tmp/manager-client.crt --type=client --restricted=false 2>/dev/null || true && rm -f /tmp/manager-client.crt")
 
+	// Detect public IPv6 on the node while SSH is still open.
+	// Detect public IPv4
+	ipv4 := ""
+	if out, err := sshExec(client, "ip -4 addr show scope global | grep inet | grep -v ' lo' | grep -v 'virbr' | awk '{print $2}' | cut -d/ -f1 | head -1"); err == nil {
+		ipv4 = strings.TrimSpace(out)
+	}
+
+	ipv6 := ""
+	if out, err := sshExec(client, "ip -6 addr show scope global | grep inet6 | grep -v fd | head -1 | awk '{print $2}' | cut -d/ -f1"); err == nil {
+		ipv6 = strings.TrimSpace(out)
+	}
+
 	// Re-assign all instances that belong to this node
 	instMu.Lock()
 	hasContainers := false
@@ -345,10 +359,12 @@ func rebuildNode(nodeID string) error {
 
 		nodesMu.Lock()
 		if n, ok := nodes[nodeID]; ok {
-			// Persist URL, network, and image so health checks don't fail after rebuild.
+			// Persist URL, network, image, and IPv6 so health checks don't fail after rebuild.
 			n.URL = fmt.Sprintf("https://%s:8443", n.SSHHost)
 			n.Network = "vpnbr0"
 			n.Image = "clever-vpn-base"
+			n.IPv4 = ipv4
+			n.IPv6 = ipv6
 
 			if allHealthy {
 				n.Status = "active"
@@ -738,6 +754,20 @@ func provisionNode(name, region, host string, port int, password string, poolSiz
 	}
 	log.Printf("  setup complete")
 
+	// Detect public IPv6 address on the node (not link-local or LXD internal)
+	// Detect public IPv4 address (exclude loopback and LXD bridges)
+	ipv4 := ""
+	if out, err := sshExec(client, "ip -4 addr show scope global | grep inet | grep -v ' lo' | grep -v 'virbr' | awk '{print $2}' | cut -d/ -f1 | head -1"); err == nil {
+		ipv4 = strings.TrimSpace(out)
+		log.Printf("  ipv4: %s", ipv4)
+	}
+
+	ipv6 := ""
+	if out, err := sshExec(client, "ip -6 addr show scope global | grep inet6 | grep -v fd | head -1 | awk '{print $2}' | cut -d/ -f1"); err == nil {
+		ipv6 = strings.TrimSpace(out)
+		log.Printf("  ipv6: %s", ipv6)
+	}
+
 	net := env("LXC_NETWORK", "vpnbr0")
 	img := env("LXC_BASE_IMAGE", "clever-vpn-base")
 
@@ -751,8 +781,10 @@ func provisionNode(name, region, host string, port int, password string, poolSiz
 		SSHPort:     port,
 		SSHPassword: password,
 		Image:       img,
+		IPv4:        ipv4,
 		PoolSize:    poolSize,
 		Status:      "active",
+		IPv6:        ipv6,
 	}
 	return rec, nil
 }

@@ -133,6 +133,8 @@ type InstanceRecord struct {
 	Region         string    `json:"region"`
 	StaticIP       string    `json:"staticIP,omitempty"`
 	NodePublicIP   string    `json:"nodePublicIP,omitempty"`
+	NodePublicIPV4 string    `json:"nodePublicIPV4,omitempty"`
+	NodePublicIPV6 string    `json:"nodePublicIPV6,omitempty"`
 	UserData       string    `json:"userData,omitempty"`
 	Created        time.Time `json:"created"`
 	State          string    `json:"state"`
@@ -650,6 +652,8 @@ func createContainerCore(userID string, userData string, cpu, mem, disk, service
 	nodesMu.Lock()
 	if n, ok := nodes[nodeID]; ok {
 		rec.NodePublicIP = n.SSHHost
+		rec.NodePublicIPV4 = n.IPv4
+		rec.NodePublicIPV6 = n.IPv6
 	}
 	nodesMu.Unlock()
 
@@ -723,6 +727,36 @@ func getNodePublicIP(nodeID string) string {
 	defer nodesMu.Unlock()
 	if n, ok := nodes[nodeID]; ok {
 		return n.SSHHost
+	}
+	return ""
+}
+
+// getNodePublicIPv4 returns the auto-detected public IPv4 of the node.
+// Falls back to SSHHost if not detected.
+func getNodePublicIPv4(nodeID string) string {
+	if nodeID == "" {
+		return ""
+	}
+	nodesMu.Lock()
+	defer nodesMu.Unlock()
+	if n, ok := nodes[nodeID]; ok {
+		if n.IPv4 != "" {
+			return n.IPv4
+		}
+		return n.SSHHost
+	}
+	return ""
+}
+
+// getNodePublicIPv6 returns the public IPv6 of the node, or empty if none.
+func getNodePublicIPv6(nodeID string) string {
+	if nodeID == "" {
+		return ""
+	}
+	nodesMu.Lock()
+	defer nodesMu.Unlock()
+	if n, ok := nodes[nodeID]; ok {
+		return n.IPv6
 	}
 	return ""
 }
@@ -1987,7 +2021,8 @@ func containerResponse(rec *InstanceRecord) map[string]interface{} {
 		"userID":         rec.UserID,
 		"nodeID":         rec.Node,
 		"region":         rec.Region,
-		"publicIP":       getNodePublicIP(rec.Node),
+		"publicIP":       getNodePublicIPv4(rec.Node),
+		"publicIPv6":     getNodePublicIPv6(rec.Node),
 		"created":        rec.Created.Format(time.RFC3339),
 		"state":          rec.State,
 		"terminalUrl":    fmt.Sprintf("https://%s/terminal/%s", cfg.Domain, rec.Name),
