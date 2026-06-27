@@ -345,6 +345,11 @@ func rebuildNode(nodeID string) error {
 
 		nodesMu.Lock()
 		if n, ok := nodes[nodeID]; ok {
+			// Persist URL, network, and image so health checks don't fail after rebuild.
+			n.URL = fmt.Sprintf("https://%s:8443", n.SSHHost)
+			n.Network = "vpnbr0"
+			n.Image = "clever-vpn-base"
+
 			if allHealthy {
 				n.Status = "active"
 				n.StatusReason = ""
@@ -525,6 +530,18 @@ func getNodeClientLocked(nodeID string) (*lxc.Client, error) {
 	n, ok := nodes[nodeID]
 	if !ok {
 		return nil, fmt.Errorf("node %s not found", nodeID)
+	}
+
+	// Auto-fill empty URL, network, and image from SSHHost and defaults.
+	// Covers cases where initial provisioning failed or rebuild didn't persist metadata.
+	if n.URL == "" && n.SSHHost != "" {
+		n.URL = fmt.Sprintf("https://%s:8443", n.SSHHost)
+	}
+	if n.Network == "" {
+		n.Network = "vpnbr0"
+	}
+	if n.Image == "" {
+		n.Image = "clever-vpn-base"
 	}
 
 	clientCert := loadFile(env("LXD_CLIENT_CERT", "client.crt"))
