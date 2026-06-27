@@ -349,7 +349,9 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
     "poolSize": "10",
     "status": "active",
     "statusReason": "",
-    "maxContainers": 5
+    "maxContainers": 5,
+    "ipv4": "192.168.1.10",
+    "ipv6": "2001:db8::1"
   }
 ]
 ```
@@ -368,6 +370,8 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 | `status` | string | `creating` / `active` / `rebuilding` / `degraded` / `offline` |
 | `statusReason` | string | 状态原因（非正常状态时） |
 | `maxContainers` | int | 最大容器数，0 = 不限制 |
+| `ipv4` | string | 自动检测的公网 IPv4（provision/rebuild 时检测） |
+| `ipv6` | string | 自动检测的公网 IPv6（provision/rebuild 时检测） |
 
 #### `PUT /api/nodes/{id}` — 更新节点配置
 
