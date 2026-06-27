@@ -633,7 +633,18 @@ func parseIPLastOctet(ip string) int {
 func sshConnect(host string, port int, password string) (*ssh.Client, error) {
 	config := &ssh.ClientConfig{
 		User: "root",
-		Auth: []ssh.AuthMethod{ssh.Password(password)},
+		Auth: []ssh.AuthMethod{
+			ssh.Password(password),
+			// Keyboard-interactive fallback for servers where the raw
+			// "password" SSH method is rejected by PAM (e.g. Ubuntu 22.04).
+			ssh.KeyboardInteractive(func(user, instruction string, questions []string, echos []bool) ([]string, error) {
+				answers := make([]string, len(questions))
+				for i := range answers {
+					answers[i] = password
+				}
+				return answers, nil
+			}),
+		},
 		HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 			return nil
 		},
