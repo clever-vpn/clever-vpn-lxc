@@ -1439,8 +1439,10 @@ func migrateContainer(name string, rec *InstanceRecord, destNodeID, destRegion s
 	log.Printf("Migrate %s: start done in %.1fs", name, time.Since(t1).Seconds())
 
 	t1 = time.Now()
-	addPortForward(destNodeID, newSSH, newIP, 22)
-	addPortForward(destNodeID, newSvc, newIP, rec.ServicePort)
+	batchAddPortForwards(destNodeID,
+		[3]string{strconv.Itoa(newSSH), newIP, "22"},
+		[3]string{strconv.Itoa(newSvc), newIP, strconv.Itoa(rec.ServicePort)},
+	)
 	log.Printf("Migrate %s: DNAT done in %.1fs", name, time.Since(t1).Seconds())
 
 	t1 = time.Now()
@@ -1483,8 +1485,10 @@ func migrateContainer(name string, rec *InstanceRecord, destNodeID, destRegion s
 // cleanupContainerLXD stops and deletes a container from LXD without touching
 // the instance registry. Used by migration to remove the old container.
 func cleanupContainerLXD(name, nodeID string, cli *lxc.Client, sshPort, svcPort int, staticIP string, servicePort int) {
-	delPortForward(nodeID, sshPort, staticIP, 22)
-	delPortForward(nodeID, svcPort, staticIP, servicePort)
+	batchDelPortForwards(nodeID,
+		[3]string{strconv.Itoa(sshPort), staticIP, "22"},
+		[3]string{strconv.Itoa(svcPort), staticIP, strconv.Itoa(servicePort)},
+	)
 	container, err := cli.GetContainer(name)
 	if err != nil {
 		log.Printf("  cleanup %s: get container: %v", name, err)

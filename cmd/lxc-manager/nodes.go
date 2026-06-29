@@ -811,6 +811,56 @@ func delRemotePortForward(nodeID string, extPort int, dstIP string, dstPort int)
 	sshExec(client, script.String())
 }
 
+// batchAddPortForwards adds multiple DNAT rules on a node in one SSH exec.
+// Each forward is {extPort, dstIP, dstPort}.
+func batchAddPortForwards(nodeID string, forwards ...[3]string) error {
+	client, err := getSSHClient(nodeID)
+	if err != nil {
+		return fmt.Errorf("ssh to %s: %w", nodeID, err)
+	}
+
+	var script strings.Builder
+	for _, f := range forwards {
+		extPort, dstIP, dstPort := f[0], f[1], f[2]
+		target := fmt.Sprintf("%s:%s", dstIP, dstPort)
+		// Flush old rules
+		script.WriteString(fmt.Sprintf("iptables -t nat -S PREROUTING 2>/dev/null | grep ' --dport %s ' | sed 's/^-A/iptables -t nat -D/' | sh 2>/dev/null\n", extPort))
+		script.WriteString(fmt.Sprintf("iptables -t nat -S OUTPUT 2>/dev/null | grep ' --dport %s ' | sed 's/^-A/iptables -t nat -D/' | sh 2>/dev/null\n", extPort))
+		// Add new rules
+		for _, proto := range []string{"tcp", "udp"} {
+			for _, chain := range []string{"PREROUTING", "OUTPUT"} {
+				script.WriteString(fmt.Sprintf("iptables -t nat -C %s -p %s --dport %s -j DNAT --to %s 2>/dev/null || iptables -t nat -A %s -p %s --dport %s -j DNAT --to %s\n",
+					chain, proto, extPort, target, chain, proto, extPort, target))
+			}
+		}
+	}
+
+	_, err = sshExec(client, script.String())
+	return err
+}
+
+// batchDelPortForwards removes multiple DNAT rules on a node in one SSH exec.
+func batchDelPortForwards(nodeID string, forwards ...[3]string) {
+	client, err := getSSHClient(nodeID)
+	if err != nil {
+		log.Printf("batch del port forward %s: ssh: %v", nodeID, err)
+		return
+	}
+
+	var script strings.Builder
+	for _, f := range forwards {
+		extPort, dstIP, dstPort := f[0], f[1], f[2]
+		target := fmt.Sprintf("%s:%s", dstIP, dstPort)
+		for _, proto := range []string{"tcp", "udp"} {
+			for _, chain := range []string{"PREROUTING", "OUTPUT"} {
+				script.WriteString(fmt.Sprintf("iptables -t nat -D %s -p %s --dport %s -j DNAT --to %s 2>/dev/null\n",
+					chain, proto, extPort, target))
+			}
+		}
+	}
+	sshExec(client, script.String())
+}
+
 // ==================== Node Migration ====================
 
 // handleNodeMigrate moves a node to a new physical machine by updating its
