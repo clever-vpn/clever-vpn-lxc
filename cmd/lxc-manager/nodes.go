@@ -342,6 +342,17 @@ func rebuildNode(nodeID string) error {
 
 	// Full rebuild: recreate all containers for this node in background.
 	go func() {
+		// Set node IPv4/IPv6 BEFORE recreating containers so bootstrap.env picks them up.
+		nodesMu.Lock()
+		if n, ok := nodes[nodeID]; ok {
+			n.URL = fmt.Sprintf("https://%s:8443", n.SSHHost)
+			n.Network = "vpnbr0"
+			n.Image = "clever-vpn-base"
+			n.IPv4 = ipv4
+			n.IPv6 = ipv6
+		}
+		nodesMu.Unlock()
+
 		recreateAllContainersOnNode(nodeID)
 
 		allHealthy := true
@@ -358,12 +369,6 @@ func rebuildNode(nodeID string) error {
 
 		nodesMu.Lock()
 		if n, ok := nodes[nodeID]; ok {
-			n.URL = fmt.Sprintf("https://%s:8443", n.SSHHost)
-			n.Network = "vpnbr0"
-			n.Image = "clever-vpn-base"
-			n.IPv4 = ipv4
-			n.IPv6 = ipv6
-
 			if allHealthy {
 				n.Status = "active"
 				n.StatusReason = ""
