@@ -756,74 +756,59 @@ func provisionNode(name, region, host string, port int, password string, poolSiz
 // addRemotePortForward adds DNAT rules on a remote node via SSH.
 // Flushes any existing rules for the same port before adding new ones.
 func addRemotePortForward(nodeID string, extPort int, dstIP string, dstPort int) error {
-	// First, clean up old rules for this port (any target IP).
-	flushPortRules(nodeID, strconv.Itoa(extPort))
-	// Then add the new rules.
-	return nodeIPTables(nodeID, "-A", strconv.Itoa(extPort), dstIP, strconv.Itoa(dstPort))
-}
-
-// delRemotePortForward removes DNAT rules on a remote node via SSH.
-func delRemotePortForward(nodeID string, extPort int, dstIP string, dstPort int) {
-	nodeIPTables(nodeID, "-D", strconv.Itoa(extPort), dstIP, strconv.Itoa(dstPort))
-}
-
-// flushPortRules removes all DNAT rules for a given port on a remote node.
-func flushPortRules(nodeID, extPort string) {
-	client, err := getSSHClient(nodeID)
-	if err != nil {
-		log.Printf("flush port %s on %s: ssh: %v", extPort, nodeID, err)
-		return
-	}
-
-	for _, chain := range []string{"PREROUTING", "OUTPUT"} {
-		// List all DNAT rules for this port (any protocol) and delete them
-		listCmd := fmt.Sprintf("iptables -t nat -L %s -n --line-numbers 2>/dev/null | grep 'dpt:%s' | awk '{print $1}' | sort -rn",
-			chain, extPort)
-		out, err := sshExec(client, listCmd)
-		if err != nil || strings.TrimSpace(out) == "" {
-			continue
-		}
-		for _, lineNum := range strings.Split(strings.TrimSpace(out), "\n") {
-			if lineNum == "" {
-				continue
-			}
-			delCmd := fmt.Sprintf("iptables -t nat -D %s %s 2>/dev/null", chain, lineNum)
-			sshExec(client, delCmd)
-		}
-	}
-}
-
-// nodeIPTables runs iptables DNAT commands on a remote node via SSH.
-func nodeIPTables(nodeID, action, extPort, dstIP, dstPort string) error {
 	client, err := getSSHClient(nodeID)
 	if err != nil {
 		return fmt.Errorf("ssh to %s: %w", nodeID, err)
 	}
 
-	target := fmt.Sprintf("%s:%s", dstIP, dstPort)
+	target := fmt.Sprintf("%s:%d", dstIP, dstPort)
+	port := strconv.Itoa(extPort)
+
+	// Build a single script: flush old rules + add new ones (4 rules: tcp/udp × PREROUTING/OUTPUT)
+	var script strings.Builder
+	// Flush old rules for this port (any chain, any protocol)
+	script.WriteString(fmt.Sprintf(
+		"iptables -t nat -S PREROUTING 2>/dev/null | grep ' --dport %s ' | sed 's/^-A/iptables -t nat -D/' | sh 2>/dev/null\n",
+		port))
+	script.WriteString(fmt.Sprintf(
+		"iptables -t nat -S OUTPUT 2>/dev/null | grep ' --dport %s ' | sed 's/^-A/iptables -t nat -D/' | sh 2>/dev/null\n",
+		port))
+	// Add new rules
 	for _, proto := range []string{"tcp", "udp"} {
 		for _, chain := range []string{"PREROUTING", "OUTPUT"} {
-			// Check if exact rule already exists
-			checkCmd := fmt.Sprintf("iptables -t nat -C %s -p %s --dport %s -j DNAT --to %s 2>/dev/null",
-				chain, proto, extPort, target)
-			out, err := sshExec(client, checkCmd)
-			if err == nil {
-				if action == "-A" {
-					continue // already exists, skip
-				}
-			}
-			_ = out
-
-			// Add or delete the rule
-			addCmd := fmt.Sprintf("iptables -t nat %s %s -p %s --dport %s -j DNAT --to %s",
-				action, chain, proto, extPort, target)
-			out, err = sshExec(client, addCmd)
-			if err != nil && action == "-A" {
-				return fmt.Errorf("iptables %s: %w\n%s", nodeID, err, out)
-			}
+			script.WriteString(fmt.Sprintf(
+				"iptables -t nat -C %s -p %s --dport %s -j DNAT --to %s 2>/dev/null || iptables -t nat -A %s -p %s --dport %s -j DNAT --to %s\n",
+				chain, proto, port, target, chain, proto, port, target))
 		}
 	}
+
+	_, err = sshExec(client, script.String())
+	if err != nil {
+		return fmt.Errorf("iptables %s: %w", nodeID, err)
+	}
 	return nil
+}
+
+// delRemotePortForward removes DNAT rules on a remote node via SSH.
+func delRemotePortForward(nodeID string, extPort int, dstIP string, dstPort int) {
+	client, err := getSSHClient(nodeID)
+	if err != nil {
+		log.Printf("del port forward %s: ssh: %v", nodeID, err)
+		return
+	}
+
+	target := fmt.Sprintf("%s:%d", dstIP, dstPort)
+	port := strconv.Itoa(extPort)
+
+	var script strings.Builder
+	for _, proto := range []string{"tcp", "udp"} {
+		for _, chain := range []string{"PREROUTING", "OUTPUT"} {
+			script.WriteString(fmt.Sprintf(
+				"iptables -t nat -D %s -p %s --dport %s -j DNAT --to %s 2>/dev/null\n",
+				chain, proto, port, target))
+		}
+	}
+	sshExec(client, script.String())
 }
 
 // ==================== Node Migration ====================
