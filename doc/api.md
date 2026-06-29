@@ -421,12 +421,12 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 
 #### `POST /api/nodes/{id}/migrate` — 迁移节点到新机器
 
-**用途**：将源节点上的所有容器**迁移到一台新机器**上，所有容器获得新的外部端口和外部 IP。
-迁移过程异步执行，API 立即返回。源节点容器逐个在新机器上重建，成功后删除旧容器。
-失败容器保留在源节点，管理员可手动重试。
+**用途**：将节点切换到一台新物理机器上。**等同于 Update + Rebuild 的组合操作**：
+先更新节点的 SSH 连接信息指向新机器，然后在新机器上重新初始化 LXD 并重建所有容器。
+容器保留原有的外部端口和静态 IP（以 `instances.json` 中的记录为准）。
 
-> **与 `PUT /api/nodes/{id}` 的区别**：update 仅修改配置参数（密码/端口/容量），不移动容器。
-> migrate 是在新机器上 provision LXD 并将所有容器搬过去，属于物理机器级别的切换。
+> **与 `PUT /api/nodes/{id}` 的区别**：update 仅修改配置参数，不触发重建。
+> **与 `POST /api/nodes/{id}/rebuild` 的区别**：rebuild 在当前机器上重建，migrate 先改 SSH 指向新机器再重建。
 
 **请求头**：`Authorization: Bearer <admin-token>`
 
@@ -445,31 +445,28 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 | `sshHost` | string | ✅ | 新机器的 SSH 地址 |
 | `sshPassword` | string | ✅ | 新机器的 root 密码 |
 | `sshPort` | int | ❌ | SSH 端口，默认 22 |
-| `poolSize` | string | ❌ | btrfs 存储池大小（GiB），默认从配置读取 |
+| `poolSize` | string | ❌ | btrfs 存储池大小（GiB），默认保持原值 |
 
-**响应** `200`（立即返回，实际迁移在后台执行）：
+**响应** `200`（重建在后台异步执行）：
 ```json
 {
-  "status": "migrating",
-  "newNodeID": "nd_xxx",
-  "name": "tokyo-1-migrate",
+  "status": "rebuilding",
+  "nodeID": "nd_abc123",
+  "name": "tokyo-1",
   "region": "jp-tokyo"
 }
 ```
 
 **迁移流程**：
 ```
-1. 注册目标节点（status: "migrating"）
-2. SSH provision 目标机器（安装 LXD、初始化网络、信任证书）
-3. 逐个迁移容器：
-   a. 在目标节点创建同规格容器（相同 userData、CPU、内存、磁盘）
-   b. 分配新的外部端口（SSH + Service）和静态 IP
-   c. /etc/clever-vpn/bootstrap.env 自动写入新节点的 SSH_HOST/PUBLIC_IPV4/PUBLIC_IPV6
-   d. 配置 DNAT 端口转发
-   e. 删除源节点旧容器
-   f. 更新 InstanceRecord: nodeID → 新节点
-4. 目标节点 status → "active"
-5. 全部成功：删除源节点；部分失败：保留源节点，目标节点 status → "degraded"
+1. 更新节点 record：SSH host / port / password → 新机器
+2. 清除缓存的 IPv4/IPv6（重建时重新检测）
+3. 标记该节点所有容器 state=creating
+4. 调用 rebuildNode（与 POST /api/nodes/{id}/rebuild 相同逻辑）：
+   a. SSH 到新机器执行 node-setup.sh（安装 LXD、初始化网络、信任证书）
+   b. 从 instances.json 读取每个容器，在新机器上重建
+   c. 配置 DNAT 端口转发
+   d. 节点状态：rebuilding → active（全部成功）或 degraded（部分失败）
 ```
 
 **迁移后容器变化**：
@@ -477,13 +474,13 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 | 属性 | 是否变化 | 说明 |
 |------|---------|------|
 | 容器名称 | ❌ 不变 | `user-xxxx` 保持一致 |
+| 外部 SSH 端口 | ❌ 不变 | `sshExtPort` 不变，只是在新机器上重新 DNAT |
+| 外部 Service 端口 | ❌ 不变 | `serviceExtPort` 不变 |
+| 静态 IP | ❌ 不变 | 容器内网 IP 不变 |
 | CPU/内存/磁盘 | ❌ 不变 | 规格完全相同 |
 | userData | ❌ 不变 | 原始 cloud-config 保留 |
 | root 密码 | ❌ 不变 | 使用 `instances.json` 中保存的密码重建 |
-| 外部 SSH 端口 | ✅ 重新分配 | `sshExtPort` 变化 |
-| 外部 Service 端口 | ✅ 重新分配 | `serviceExtPort` 变化 |
-| 静态 IP | ✅ 重新分配 | 新节点的 IP 池中分配 |
-| `bootstrap.env` | ✅ 更新 | `INSTANCE_SSH_HOST` / `IPV4` / `IPV6` 指向新节点 |
+| `bootstrap.env` | ✅ 更新 | `INSTANCE_SSH_HOST` / `IPV4` / `IPV6` 指向新机器 |
 
 #### `POST /api/nodes/{id}/rebuild` — 重建节点
 
