@@ -225,6 +225,7 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
   "state": "running",
   "health": "",
   "terminalUrl": "https://lxc-api.clever-clouds.com/terminal/user-a1b2c3d4",
+  "planID": "lxc-1c-512mb",
   "label": "",
   "userData": ""
 }
@@ -266,6 +267,7 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
   "state": "running",
   "health": "",
   "terminalUrl": "https://lxc-api.clever-clouds.com/terminal/user-a1b2c3d4",
+  "planID": "lxc-1c-512mb",
   "label": "",
   "userData": ""
 }
