@@ -1580,7 +1580,24 @@ func handleNodeAdd(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleNodeList(w http.ResponseWriter, r *http.Request) {
-	jsonOK(w, listNodesSlice())
+	nodesMu.Lock()
+	nodeSlice := listNodesSliceLocked()
+	nodesMu.Unlock()
+
+	instMu.Lock()
+	counts := make(map[string]int, len(nodeSlice))
+	for _, rec := range instances {
+		counts[rec.Node]++
+	}
+	instMu.Unlock()
+
+	result := make([]map[string]interface{}, 0, len(nodeSlice))
+	for _, n := range nodeSlice {
+		m := nodeToMap(n)
+		m["containerCount"] = counts[n.ID]
+		result = append(result, m)
+	}
+	jsonOK(w, result)
 }
 
 func handleNodeDelete(w http.ResponseWriter, r *http.Request) {
@@ -1710,17 +1727,7 @@ func handleRefreshNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jsonOK(w, map[string]interface{}{
-		"nodeID":        n.ID,
-		"name":          n.Name,
-		"status":        n.Status,
-		"region":        n.Region,
-		"sshHost":       n.SSHHost,
-		"sshPort":       n.SSHPort,
-		"poolSize":      n.PoolSize,
-		"maxContainers": n.MaxContainers,
-		"statusReason":  n.StatusReason,
-	})
+	jsonOK(w, nodeToMap(n))
 }
 
 // ==================== User Handlers ====================
@@ -2265,6 +2272,26 @@ func cmdServe() {
 
 // containerResponse builds a consistent response map from an InstanceRecord.
 // All container API endpoints use this to return the same fields as instances.json.
+// nodeToMap returns a NodeRecord as a JSON-friendly map with container count.
+func nodeToMap(n *NodeRecord) map[string]interface{} {
+	return map[string]interface{}{
+		"id":            n.ID,
+		"name":          n.Name,
+		"region":        n.Region,
+		"url":           n.URL,
+		"network":       n.Network,
+		"sshHost":       n.SSHHost,
+		"sshPort":       n.SSHPort,
+		"image":         n.Image,
+		"poolSize":      n.PoolSize,
+		"status":        n.Status,
+		"statusReason":  n.StatusReason,
+		"maxContainers": n.MaxContainers,
+		"ipv4":          n.IPv4,
+		"ipv6":          n.IPv6,
+	}
+}
+
 func containerResponse(rec *InstanceRecord) map[string]interface{} {
 	resp := map[string]interface{}{
 		"id":             rec.Name,
