@@ -194,6 +194,9 @@ func pickNode(region string) (string, *lxc.Client, error) {
 		if n.MaxContainers > 0 && nodeCounts[id] >= n.MaxContainers {
 			continue // at capacity
 		}
+		if n.MaxContainers == 0 && nodeCounts[id] >= 0 {
+			continue // draining: accepts no new containers
+		}
 		cnt := nodeCounts[id]
 		if bestCount == -1 || cnt < bestCount {
 			bestCount = cnt

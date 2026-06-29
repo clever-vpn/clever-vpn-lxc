@@ -1629,7 +1629,7 @@ func handleNodeUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		MaxContainers flexInt    `json:"maxContainers"`
+		MaxContainers *int        `json:"maxContainers"`
 		SSHPassword   *string    `json:"sshPassword"`
 		SSHPort       flexInt    `json:"sshPort"`
 		PoolSize      flexString `json:"poolSize"`
@@ -1639,11 +1639,7 @@ func handleNodeUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var maxContainers *int
-	if req.MaxContainers > 0 {
-		v := int(req.MaxContainers)
-		maxContainers = &v
-	}
+	// maxContainers: nil = don't change, 0 = drain mode (accept no new containers)
 	var sshPort *int
 	if req.SSHPort > 0 {
 		v := int(req.SSHPort)
@@ -1654,7 +1650,7 @@ func handleNodeUpdate(w http.ResponseWriter, r *http.Request) {
 		v := string(req.PoolSize)
 		poolSize = &v
 	}
-	if err := updateNodeConfig(nodeID, maxContainers, req.SSHPassword, sshPort, poolSize); err != nil {
+	if err := updateNodeConfig(nodeID, req.MaxContainers, req.SSHPassword, sshPort, poolSize); err != nil {
 		jsonError(w, err.Error(), 404)
 		return
 	}
