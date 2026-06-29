@@ -397,9 +397,6 @@ func recreateAllContainersOnNode(nodeID string) {
 		return
 	}
 
-	img := env("LXC_BASE_IMAGE", "clever-vpn-base")
-	net := env("LXC_NETWORK", "vpnbr0")
-
 	instMu.Lock()
 	var toRebuild []*InstanceRecord
 	for _, rec := range instances {
@@ -423,40 +420,13 @@ func recreateAllContainersOnNode(nodeID string) {
 		log.Printf("Rebuild: creating %s (cpu=%d mem=%dMB disk=%dGB ip=%s ssh=%d svc=%d)",
 			rec.Name, rec.CPU, rec.Mem, rec.Disk, rec.StaticIP, rec.SSHExtPort, rec.ServiceExtPort)
 
-		cloudConfig := mergeUserData(rec.UserData, rec.Name, bootstrapEnv(rec.Name, nodeID, rec.CPU, rec.Mem, rec.Disk,
-			PortInfo{SSH: rec.SSHExtPort, Service: rec.ServiceExtPort}), rec.Password)
-		if err := cli.CreateContainer(rec.Name, img, net, rec.StaticIP, rec.CPU, rec.Mem, rec.Disk,
-			map[string]string{"cloud-init.user-data": cloudConfig}); err != nil {
-			log.Printf("Rebuild: create %s: %v", rec.Name, err)
+		ports := PortInfo{SSH: rec.SSHExtPort, Service: rec.ServiceExtPort}
+		if err := createContainerOnNode(cli, nodeID, rec, ports, rec.StaticIP); err != nil {
+			log.Printf("Rebuild: %s: %v", rec.Name, err)
 			continue
 		}
-		if err := cli.StartContainer(rec.Name); err != nil {
-			log.Printf("Rebuild: start %s: %v", rec.Name, err)
-			continue
-		}
-
-		go func(r *InstanceRecord) {
-			if err := addPortForward(nodeID, r.SSHExtPort, r.StaticIP, 22); err != nil {
-				log.Printf("Rebuild %s: forward ssh: %v", r.Name, err)
-				return
-			}
-			if err := addPortForward(nodeID, r.ServiceExtPort, r.StaticIP, r.ServicePort); err != nil {
-				log.Printf("Rebuild %s: forward svc: %v", r.Name, err)
-				return
-			}
-			// Sync external IP info from current node record (may have changed after migration)
-			nodesMu.Lock()
-			if n, ok := nodes[nodeID]; ok {
-				r.NodePublicIP = n.SSHHost
-				r.NodePublicIPV4 = n.IPv4
-				r.NodePublicIPV6 = n.IPv6
-			}
-			nodesMu.Unlock()
-			r.State = "running"
-			saveInstances()
-			log.Printf("Rebuild: %s restored (ssh:%d→%s:22 svc:%d→%s:%d)",
-				r.Name, r.SSHExtPort, r.StaticIP, r.ServiceExtPort, r.StaticIP, r.ServicePort)
-		}(rec)
+		log.Printf("Rebuild: %s restored (ssh:%d→%s:22 svc:%d→%s:%d)",
+			rec.Name, rec.SSHExtPort, rec.StaticIP, rec.ServiceExtPort, rec.StaticIP, rec.ServicePort)
 	}
 }
 
