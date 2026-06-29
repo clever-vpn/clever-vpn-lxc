@@ -437,7 +437,11 @@ func recreateAllContainersOnNode(nodeID string) {
 func listNodesSlice() []*NodeRecord {
 	nodesMu.Lock()
 	defer nodesMu.Unlock()
+	return listNodesSliceLocked()
+}
 
+// listNodesSliceLocked returns all nodes. Caller must hold nodesMu.
+func listNodesSliceLocked() []*NodeRecord {
 	result := make([]*NodeRecord, 0, len(nodes))
 	for _, rec := range nodes {
 		result = append(result, rec)
