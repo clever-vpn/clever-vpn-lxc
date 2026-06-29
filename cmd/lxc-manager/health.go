@@ -7,29 +7,35 @@ import (
 	"time"
 )
 
-// Container states.
+// Container state values — set exclusively by API handlers (push).
+// These represent the authoritative lifecycle stage of the container.
 const (
 	stateRunning    = "running"
-	stateUnhealthy  = "unhealthy"
-	stateLost       = "lost"    // node removed, container has no node
 	stateStopped    = "stopped"
-	stateFailed     = "failed"  // auto-recovery failed, needs admin intervention
 	stateCreating   = "creating"
 	stateRecovering = "recovering"
+	stateFailed     = "failed" // auto-recovery failed, needs admin intervention
+)
+
+// Container health values — set exclusively by the health checker (pull).
+// These represent the observed runtime condition of a container expected to be running.
+const (
+	healthUnhealthy = "unhealthy" // running but exec fails repeatedly
+	healthLost      = "lost"      // container or node not reachable
 )
 
 var (
 	stateMu    sync.Mutex
-	stateFails = map[string]int{} // container name → consecutive failures
+	stateFails = map[string]int{} // container name → consecutive exec failures
 )
 
 const stateCheckInterval = 60 * time.Second
 const stateMaxFails = 3
 const stateExecTimeout = 5 * time.Second
 
-// startStateCheckLoop periodically checks the state of all registered containers.
+// startStateCheckLoop periodically checks the health of all running containers.
 func startStateCheckLoop() {
-	log.Printf("State: checking every %s, max %d consecutive failures", stateCheckInterval, stateMaxFails)
+	log.Printf("Health checker: interval=%s, max consecutive failures=%d", stateCheckInterval, stateMaxFails)
 	go func() {
 		time.Sleep(15 * time.Second) // wait for initial startup
 		for {
@@ -113,6 +119,9 @@ func checkNodeHealth(nodeID string) {
 	}
 }
 
+// checkContainer verifies the actual LXD status of a container and updates
+// only its health field. It never modifies state, which is the exclusive
+// domain of API handlers.
 func checkContainer(name string) {
 	instMu.Lock()
 	rec, exists := instances[name]
@@ -121,25 +130,29 @@ func checkContainer(name string) {
 		return
 	}
 
-	// No node assigned → lost
-	if rec.Node == "" {
-		if rec.State != stateLost {
-			setState(name, stateLost, "no node assigned")
-		}
+	// Only check containers that are expected to be running.
+	// Stopped / creating / recovering / failed containers are not our concern.
+	if rec.State != stateRunning {
 		return
 	}
 
-	// Node status determines container state
+	// No node assigned → lost
+	if rec.Node == "" {
+		setHealth(name, healthLost, "no node assigned")
+		return
+	}
+
+	// Node status determines container reachability
 	nodeStatus := getNodeStatus(rec.Node)
 	switch nodeStatus {
 	case "":
-		setState(name, stateLost, "node not found in registry")
+		setHealth(name, healthLost, "node not found in registry")
 		return
 	case "offline":
-		setState(name, stateUnhealthy, "node is offline")
+		setHealth(name, healthUnhealthy, "node is offline")
 		return
 	case "degraded", "creating", "rebuilding":
-		setState(name, stateUnhealthy, "node is "+nodeStatus)
+		setHealth(name, healthUnhealthy, "node is "+nodeStatus)
 		return
 	}
 
@@ -147,7 +160,7 @@ func checkContainer(name string) {
 	nodeID := rec.Node
 	cli := clientForInstance(name)
 	if cli == nil {
-		setState(name, stateLost, "no LXD client for active node")
+		setHealth(name, healthLost, "no LXD client for active node")
 		return
 	}
 
@@ -157,7 +170,9 @@ func checkContainer(name string) {
 		instMu.Lock()
 		rec, exists := instances[name]
 		instMu.Unlock()
-		if exists && rec.Node == nodeID {
+		if exists && rec.Node == nodeID && rec.State == stateRunning {
+			// Transition to recovering (this IS a state change, because the
+			// container no longer exists — we must recreate it).
 			setState(name, stateRecovering, "not found on node, attempting auto-recovery")
 			go recoverMissingContainer(rec)
 		}
@@ -165,7 +180,8 @@ func checkContainer(name string) {
 	}
 
 	if c.Status != "Running" {
-		setState(name, stateStopped, "status is "+c.Status)
+		// Container exists but is not running — unexpected for a running container.
+		setHealth(name, healthUnhealthy, "status is "+c.Status)
 		return
 	}
 
@@ -177,17 +193,17 @@ func checkContainer(name string) {
 		stateMu.Unlock()
 
 		if fails >= stateMaxFails {
-			setState(name, stateUnhealthy, fmt.Sprintf("exec failed %d times", fails))
+			setHealth(name, healthUnhealthy, fmt.Sprintf("exec failed %d consecutive times", fails))
 		}
 		return
 	}
 
-	// Success
+	// Success — clear health (container is fine)
 	stateMu.Lock()
 	delete(stateFails, name)
 	stateMu.Unlock()
 
-	setState(name, stateRunning, "")
+	clearHealth(name)
 }
 
 // getNodeStatus returns the status of a node without locking instMu.
@@ -200,6 +216,8 @@ func getNodeStatus(nodeID string) string {
 	return ""
 }
 
+// setState updates the lifecycle state of a container and clears its health.
+// Used by API handlers (start/stop/restart/create) and auto-recovery.
 func setState(name, status, reason string) {
 	instMu.Lock()
 	rec, exists := instances[name]
@@ -211,11 +229,56 @@ func setState(name, status, reason string) {
 	prev := rec.State
 	rec.State = status
 	rec.StateReason = reason
+	rec.Health = "" // state change resets health observation
 	instMu.Unlock()
 
 	if prev != status {
 		log.Printf("AUDIT: state %s %s→%s (%s)", name, prev, status, reason)
 	}
+
+	// Reset exec failure counter on state transitions to running
+	if status == stateRunning {
+		stateMu.Lock()
+		delete(stateFails, name)
+		stateMu.Unlock()
+	}
+}
+
+// setHealth updates only the health field of a container. It never touches state.
+// Used exclusively by the health checker.
+func setHealth(name, health, reason string) {
+	instMu.Lock()
+	rec, exists := instances[name]
+	if !exists {
+		instMu.Unlock()
+		return
+	}
+
+	prev := rec.Health
+	rec.Health = health
+	rec.StateReason = reason
+	instMu.Unlock()
+
+	if prev != health {
+		log.Printf("AUDIT: health %s %s→%s (%s)", name, prev, health, reason)
+	}
+}
+
+// clearHealth resets the health field to empty (container is healthy).
+func clearHealth(name string) {
+	instMu.Lock()
+	rec, exists := instances[name]
+	if !exists {
+		instMu.Unlock()
+		return
+	}
+
+	if rec.Health != "" {
+		rec.Health = ""
+		rec.StateReason = ""
+		log.Printf("AUDIT: health %s cleared (healthy)", name)
+	}
+	instMu.Unlock()
 }
 
 // recoverMissingContainer recreates a container that was lost from LXD

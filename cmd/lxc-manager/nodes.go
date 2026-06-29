@@ -135,7 +135,7 @@ func removeNode(nodeID string) error {
 	for name, r := range instances {
 		if r.Node == nodeID {
 			r.Node = ""
-			r.State = "lost"
+			r.Health = healthLost
 			r.StateReason = "node removed"
 			log.Printf("Container %s marked lost (node %s removed)", name, nodeID)
 		}
@@ -349,7 +349,7 @@ func rebuildNode(nodeID string) error {
 		instMu.Lock()
 		if hasContainers {
 			for _, rec := range instances {
-				if rec.Node == nodeID && (rec.State == stateLost || rec.State == "creating") {
+				if rec.Node == nodeID && (rec.Health == healthLost || rec.State == stateCreating) {
 					allHealthy = false
 					break
 				}
@@ -401,7 +401,7 @@ func recreateAllContainersOnNode(nodeID string) {
 	instMu.Lock()
 	var toRebuild []*InstanceRecord
 	for _, rec := range instances {
-		if rec.Node == nodeID && (rec.State == "creating" || rec.State == stateLost) {
+		if rec.Node == nodeID && (rec.State == stateCreating || rec.Health == healthLost) {
 			toRebuild = append(toRebuild, rec)
 			// Pre-claim ports to avoid conflicts
 			usedSSH[rec.SSHExtPort] = true
@@ -462,7 +462,7 @@ func recoverOrphanContainersByPublicIP(nodeID string, sshHost string) {
 	instMu.Lock()
 	var toRecover []*InstanceRecord
 	for _, rec := range instances {
-		if rec.Node == "" && rec.State == stateLost && rec.NodePublicIP == sshHost && rec.NodePublicIP != "" {
+		if rec.Node == "" && rec.Health == healthLost && rec.NodePublicIP == sshHost && rec.NodePublicIP != "" {
 			toRecover = append(toRecover, rec)
 			// Pre-claim ports
 			usedSSH[rec.SSHExtPort] = true
