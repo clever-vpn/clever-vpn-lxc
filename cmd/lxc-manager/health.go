@@ -232,6 +232,8 @@ func setState(name, status, reason string) {
 	rec.Health = "" // state change resets health observation
 	instMu.Unlock()
 
+	saveInstances()
+
 	if prev != status {
 		log.Printf("AUDIT: state %s %s→%s (%s)", name, prev, status, reason)
 	}
