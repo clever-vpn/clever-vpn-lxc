@@ -222,12 +222,15 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
   "publicIP": "203.0.113.5",
   "publicIPv6": "2001:db8::1",
   "created": "2026-06-24T09:00:00Z",
-  "state": "creating",
+  "state": "running",
+  "health": "",
   "terminalUrl": "https://lxc-api.clever-clouds.com/terminal/user-a1b2c3d4",
   "label": "",
   "userData": ""
 }
 ```
+
+> 容器创建后 `state` 为 `"running"`（创建成功即已启动），`health` 为空字符串（将由后台健康检测填充）。
 
 ### `GET /api/containers` — 列出我的容器
 
@@ -243,7 +246,7 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 
 **请求头**：`Authorization: Bearer <user-token>`
 
-**响应** `200`：返回完整的容器记录：
+**响应** `200`：返回完整的容器记录。对于 `state=running` 的容器，GET 请求会实时查询 LXD 确认实际状态，确保返回的数据反映当前真实情况：
 ```json
 {
   "id": "user-a1b2c3d4",
@@ -261,6 +264,7 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
   "publicIPv6": "2001:db8::1",
   "created": "2026-06-24T09:00:00Z",
   "state": "running",
+  "health": "",
   "terminalUrl": "https://lxc-api.clever-clouds.com/terminal/user-a1b2c3d4",
   "label": "",
   "userData": ""
@@ -269,15 +273,27 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 
 ### `POST /api/containers/{id}/start` — 启动容器
 
+操作成功后立即将容器 `state` 设为 `"running"`，`health` 清空（等待下次健康检测）。
+
 **请求头**：`Authorization: Bearer <user-token>`
+
+**响应** `200`：返回完整的容器记录（`state` 已更新为 `"running"`）。
 
 ### `POST /api/containers/{id}/stop` — 停止容器
 
+操作成功后立即将容器 `state` 设为 `"stopped"`，`health` 清空。
+
 **请求头**：`Authorization: Bearer <user-token>`
+
+**响应** `200`：返回完整的容器记录（`state` 已更新为 `"stopped"`）。
 
 ### `POST /api/containers/{id}/restart` — 重启容器
 
+先停止再启动。成功后 `state` 为 `"running"`，`health` 清空。
+
 **请求头**：`Authorization: Bearer <user-token>`
+
+**响应** `200`：返回完整的容器记录（`state` 已更新为 `"running"`）。
 
 ### `DELETE /api/containers/{id}` — 删除容器
 
@@ -555,19 +571,61 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 
 ## 容器状态
 
-后台每 **60 秒** 自动检查所有容器和节点的状态。管理员可通过 `POST /api/admin/containers/{id}/refresh` 和 `POST /api/nodes/{id}/refresh` 手动触发即时检查。
+容器状态由两个独立字段表达：`state`（操作生命周期）和 `health`（运行时健康）。两者由不同的代码路径写入，互不污染。
 
-容器列表和详情接口返回 `state` 字段：
+### `state` — 操作生命周期状态
 
-| 值 | 说明 |
+**写入者**：API handler（start/stop/restart/create）和自动恢复流程。
+
+**语义**：容器当前处于哪个生命周期阶段。操作成功后**立即**更新，可信任。
+
+| 值 | 含义 | 触发者 |
+|------|------|--------|
+| `running` | 容器在运行 | 用户 start / 创建完成 / 恢复完成 |
+| `stopped` | 容器已停止 | 用户 stop |
+| `creating` | 正在创建中 | 系统创建流程 |
+| `recovering` | 自动恢复中 | 健康检测发现容器丢失 |
+| `failed` | 恢复失败，需管理员介入 | 自动恢复失败 |
+
+> **可信性保证**：start/stop 命令在 LXD 操作成功后才更新 `state`。API 消费者无需怀疑 `state` 的准确性。
+
+### `health` — 运行时健康状态
+
+**写入者**：后台健康检查器（每 60 秒）和 `GET /api/containers/{id}` 的实时查询。
+
+**语义**：仅在 `state=running` 时有意义，表示容器的实际运行质量。
+
+| 值 | 含义 |
 |------|------|
-| `running` | 运行中，LXD exec 响应正常 |
-| `unhealthy` | 连续 3 次 exec 检查失败 |
-| `lost` | 节点已删除或容器在 LXD 中不存在 |
-| `stopped` | 容器未运行 |
-| `creating` | 创建中，尚未就绪 |
-| `recovering` | 自动恢复中 |
-| `failed` | 自动恢复失败，需管理员介入 |
+| `""` (空字符串) | 健康，或 state 非 running（不适用） |
+| `unhealthy` | 运行中但 exec 连续 3 次失败，或节点异常 |
+| `lost` | 容器或节点不可达 |
+
+### 两者的关系
+
+```
+state         health        含义
+────────────────────────────────────────
+running       ""            ✅ 正常运行
+running       "unhealthy"   ⚠️ 运行中但异常
+running       "lost"        🔴 节点失联
+stopped       ""            ⏸️ 用户主动停止
+creating      ""            🔄 创建中
+recovering    ""            🔄 自动恢复中
+failed        ""            ❌ 恢复失败
+```
+
+**关键规则**：
+- `state` 由 API 操作设定，健康检测**永远不改** `state`
+- `health` 由健康检测设定，API handler（start/stop）**清空** `health`
+- `state` 变更时自动清空 `health`（重新开始观测）
+- 前端展示优先看 `state`，`state=running` 时再看 `health`
+
+### 检测机制
+
+后台每 **60 秒** 自动检查所有 `state=running` 容器和节点的健康状态。管理员可通过 `POST /api/admin/containers/{id}/refresh` 和 `POST /api/nodes/{id}/refresh` 手动触发即时检查。
+
+用户调用 `GET /api/containers/{id}` 时，对于 `state=running` 的容器会实时查询 LXD 确认实际运行状态，确保返回数据反映当前真实情况。
 
 ---
 

@@ -138,6 +138,7 @@ type InstanceRecord struct {
 	UserData       string    `json:"userData,omitempty"`
 	Created        time.Time `json:"created"`
 	State          string    `json:"state"`
+	Health         string    `json:"health,omitempty"`
 	StateReason    string    `json:"stateReason,omitempty"`
 	Label          string    `json:"label,omitempty"`
 }
@@ -643,7 +644,7 @@ func createContainerCore(userID string, userData string, cpu, mem, disk, service
 		UserID:      userID,
 		Node:        nodeID,
 		Region:      region,
-		State:       "running",
+		State:       stateCreating,
 		UserData:    userData,
 		Label:       label,
 	}
@@ -679,6 +680,7 @@ func createContainerCore(userID string, userData string, cpu, mem, disk, service
 		setNodeStatus(nodeID, "degraded", fmt.Sprintf("start failed: %v", err))
 		return nil, PortInfo{}, fmt.Errorf("start: %v", err)
 	}
+	setState(name, stateRunning, "")
 
 	// Port forwarding uses known static IP — no need to wait
 	go func() {
@@ -826,7 +828,34 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build response from instance record
+	// For running containers, do a quick LXD query to confirm actual state.
+	// This ensures the response reflects reality, not just memory.
+	if rec.State == stateRunning && rec.Node != "" {
+		cli := clientForInstance(name)
+		if cli != nil {
+			c, err := cli.GetContainer(name)
+			if err == nil {
+				if c.Status != "Running" {
+					// LXD says not running — update health but don't change state
+					setHealth(name, healthUnhealthy, "actual status: "+c.Status)
+				} else if rec.Health == healthUnhealthy {
+					// Container is back to running, clear health proactively
+					if err := cli.ExecCheck(name, stateExecTimeout); err == nil {
+						clearHealth(name)
+					}
+				}
+			}
+		}
+		// Re-read the updated record
+		instMu.Lock()
+		rec, exists = instances[name]
+		instMu.Unlock()
+		if !exists {
+			jsonError(w, "not found", 404)
+			return
+		}
+	}
+
 	resp := containerResponse(rec)
 	jsonOK(w, resp)
 }
@@ -911,7 +940,8 @@ func handleStart(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, fmt.Sprintf("start: %v", err), 500)
 		return
 	}
-	jsonOK(w, map[string]string{"status": "started"})
+	setState(name, stateRunning, "")
+	jsonOK(w, containerResponse(instances[name]))
 }
 
 func handleStop(w http.ResponseWriter, r *http.Request) {
@@ -940,7 +970,8 @@ func handleStop(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, fmt.Sprintf("stop: %v", err), 500)
 		return
 	}
-	jsonOK(w, map[string]string{"status": "stopped"})
+	setState(name, stateStopped, "")
+	jsonOK(w, containerResponse(instances[name]))
 }
 
 func handleRestart(w http.ResponseWriter, r *http.Request) {
@@ -974,7 +1005,8 @@ func handleRestart(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, fmt.Sprintf("start: %v", err), 500)
 		return
 	}
-	jsonOK(w, map[string]string{"status": "restarted"})
+	setState(name, stateRunning, "")
+	jsonOK(w, containerResponse(instances[name]))
 }
 
 func handleRefreshContainer(w http.ResponseWriter, r *http.Request) {
@@ -1186,7 +1218,8 @@ func handleAdminStartContainer(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, fmt.Sprintf("start: %v", err), 500)
 		return
 	}
-	jsonOK(w, map[string]string{"status": "started"})
+	setState(name, stateRunning, "")
+	jsonOK(w, containerResponse(instances[name]))
 }
 
 // handleAdminStopContainer allows admin to stop any container.
@@ -1215,7 +1248,8 @@ func handleAdminStopContainer(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, fmt.Sprintf("stop: %v", err), 500)
 		return
 	}
-	jsonOK(w, map[string]string{"status": "stopped"})
+	setState(name, stateStopped, "")
+	jsonOK(w, containerResponse(instances[name]))
 }
 
 // handleAdminRestartContainer allows admin to restart any container.
@@ -1248,7 +1282,8 @@ func handleAdminRestartContainer(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, fmt.Sprintf("start: %v", err), 500)
 		return
 	}
-	jsonOK(w, map[string]string{"status": "restarted"})
+	setState(name, stateRunning, "")
+	jsonOK(w, containerResponse(instances[name]))
 }
 
 // ==================== Node Handlers ====================
@@ -2025,6 +2060,7 @@ func containerResponse(rec *InstanceRecord) map[string]interface{} {
 		"publicIPv6":     getNodePublicIPv6(rec.Node),
 		"created":        rec.Created.Format(time.RFC3339),
 		"state":          rec.State,
+		"health":         rec.Health,
 		"terminalUrl":    fmt.Sprintf("https://%s/terminal/%s", cfg.Domain, rec.Name),
 		"label":          rec.Label,
 		"userData":       rec.UserData,
