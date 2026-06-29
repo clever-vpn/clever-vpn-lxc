@@ -1350,6 +1350,7 @@ func handleAdminMigrateContainer(w http.ResponseWriter, r *http.Request) {
 
 // migrateContainer performs the actual container migration asynchronously.
 func migrateContainer(name string, rec *InstanceRecord, destNodeID, destRegion string, destCli *lxc.Client) {
+	t0 := time.Now()
 	img := env("LXC_BASE_IMAGE", "clever-vpn-base")
 	net := env("LXC_NETWORK", "vpnbr0")
 
@@ -1400,12 +1401,14 @@ func migrateContainer(name string, rec *InstanceRecord, destNodeID, destRegion s
 	}
 
 	newIP := allocateStaticIP(destNodeID)
+	log.Printf("Migrate %s: ports+IP allocated in %.1fs (ssh=%d svc=%d ip=%s)", name, time.Since(t0).Seconds(), newSSH, newSvc, newIP)
 
 	ports := PortInfo{SSH: newSSH, Service: newSvc}
 	cloudConfig := mergeUserData(rec.UserData, name,
 		bootstrapEnv(name, destNodeID, rec.CPU, rec.Mem, rec.Disk, ports),
 		rec.Password)
 
+	t1 := time.Now()
 	if err := destCli.CreateContainer(name, img, net, newIP, rec.CPU, rec.Mem, rec.Disk,
 		map[string]string{"cloud-init.user-data": cloudConfig}); err != nil {
 		instMu.Lock()
@@ -1418,7 +1421,9 @@ func migrateContainer(name string, rec *InstanceRecord, destNodeID, destRegion s
 		log.Printf("Migrate %s: create on dest: %v", name, err)
 		return
 	}
+	log.Printf("Migrate %s: create done in %.1fs", name, time.Since(t1).Seconds())
 
+	t1 = time.Now()
 	if err := destCli.StartContainer(name); err != nil {
 		destCli.DeleteContainer(name)
 		instMu.Lock()
@@ -1431,10 +1436,14 @@ func migrateContainer(name string, rec *InstanceRecord, destNodeID, destRegion s
 		log.Printf("Migrate %s: start on dest: %v", name, err)
 		return
 	}
+	log.Printf("Migrate %s: start done in %.1fs", name, time.Since(t1).Seconds())
 
+	t1 = time.Now()
 	addPortForward(destNodeID, newSSH, newIP, 22)
 	addPortForward(destNodeID, newSvc, newIP, rec.ServicePort)
+	log.Printf("Migrate %s: DNAT done in %.1fs", name, time.Since(t1).Seconds())
 
+	t1 = time.Now()
 	if rec.Node != "" {
 		if oldCli, err := getNodeClient(rec.Node); err == nil {
 			cleanupContainerLXD(name, rec.Node, oldCli, rec.SSHExtPort, rec.ServiceExtPort, rec.StaticIP, rec.ServicePort)
@@ -1442,6 +1451,7 @@ func migrateContainer(name string, rec *InstanceRecord, destNodeID, destRegion s
 			log.Printf("Migrate %s: old node %s unreachable, skipping cleanup", name, rec.Node)
 		}
 	}
+	log.Printf("Migrate %s: cleanup done in %.1fs", name, time.Since(t1).Seconds())
 
 	nodesMu.Lock()
 	dest, _ := nodes[destNodeID]
@@ -1466,8 +1476,8 @@ func migrateContainer(name string, rec *InstanceRecord, destNodeID, destRegion s
 	instMu.Unlock()
 	saveInstances()
 
-	log.Printf("Migrate: %s moved to %s (ssh=%d→%d svc=%d→%d ip=%s region=%s)",
-		name, destNodeID, rec.SSHExtPort, newSSH, rec.ServiceExtPort, newSvc, newIP, destRegion)
+	log.Printf("Migrate: %s moved to %s (ssh=%d→%d svc=%d→%d ip=%s region=%s) in %.1fs total",
+		name, destNodeID, rec.SSHExtPort, newSSH, rec.ServiceExtPort, newSvc, newIP, destRegion, time.Since(t0).Seconds())
 }
 
 // cleanupContainerLXD stops and deletes a container from LXD without touching
