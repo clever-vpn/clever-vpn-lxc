@@ -531,9 +531,70 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 
 #### `DELETE /api/nodes/{id}` — 删除节点
 
-删除节点时清空关联容器的 `nodeID`，标记为 `lost`。容器记录保留，由用户自行清理。
+**前提**：节点上的容器数必须为 0。先通过容器迁移清空节点，再删除。
+
+**删除前操作流程**：
+```
+1. PUT /api/nodes/{id}  { "maxContainers": 0 }     // 停止分配新容器
+2. POST /api/admin/containers/{id}/migrate ...       // 逐个迁移容器
+3. GET /api/nodes/{id}/containers                    // 确认容器数为 0
+4. DELETE /api/nodes/{id}                            // 安全删除
+```
 
 **请求头**：`Authorization: Bearer <admin-token>`
+
+**错误** `400`：`node nd_xxx still has 3 container(s); migrate them first`
+
+### 容器迁移
+
+#### `POST /api/admin/containers/{id}/migrate` — 迁移容器到指定节点
+
+**用途**：将单个容器从当前节点迁移到目标节点。容器名称不变，端口和 IP 重新分配，
+`/etc/clever-vpn/bootstrap.env` 自动更新为新节点的 IP 信息。
+
+> 仅管理员可操作。迁移异步执行，API 立即返回 `state="migrating"`，
+> 完成后 `state` 变为 `"running"`。失败时旧容器保留，`stateReason` 记录原因。
+
+**请求头**：`Authorization: Bearer <admin-token>`
+
+**请求体**：
+```json
+{ "nodeID": "nd_xxx" }
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `nodeID` | string | ✅ | 目标节点 ID |
+
+**响应** `200`：返回完整的容器记录，`state` 为 `"migrating"`。
+
+**错误**：
+- `400`：`container is already on this node` — 目标节点与当前节点相同
+- `400`：`target node is degraded` — 目标节点不可用
+- `404`：容器或目标节点不存在
+
+**迁移流程**：
+```
+1. 在目标节点分配新端口和新 IP
+2. 用相同的 userData + 新 bootstrap.env 在目标节点创建容器
+3. 启动容器 + 配置 DNAT
+4. 尝试销毁旧容器（旧节点不可达则跳过）
+5. 更新 InstanceRecord: nodeID/ports/IP/region → 新值
+6. state: "migrating" → "running"
+```
+
+**迁移后变化**：
+
+| 属性 | 是否变化 | 说明 |
+|------|---------|------|
+| 容器名称 | ❌ 不变 | |
+| CPU/内存/磁盘 | ❌ 不变 | |
+| userData | ❌ 不变 | |
+| root 密码 | ❌ 不变 | |
+| 外部端口 | ✅ 新分配 | |
+| 静态 IP | ✅ 新分配 | |
+| region | ✅ 更新 | 自动更新为目标节点的 region |
+| `bootstrap.env` | ✅ 更新 | IP/SSH_HOST 指向新节点 |
 
 ### 用户管理
 

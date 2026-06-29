@@ -63,7 +63,8 @@ lxc-manager install --domain your-domain.com
 | `POST` | `/api/nodes/:id/migrate` | admin | 迁移节点到新机器 |
 | `POST` | `/api/nodes/:id/rebuild` | admin | 重建节点（重新初始化并恢复容器） |
 | `GET` | `/api/nodes/:id/containers` | admin | 节点上所有容器 |
-| `DELETE` | `/api/nodes/:id` | admin | 删除节点 |
+| `DELETE` | `/api/nodes/:id` | admin | 删除节点（容器数必须为 0） |
+| `POST` | `/api/admin/containers/:name/migrate` | admin | 迁移容器到指定节点 |
 | `POST` | `/api/users` | admin | 创建用户（返回 userID + name + token） |
 | `GET` | `/api/users` | admin | 列出用户（id / name / containers） |
 | `DELETE` | `/api/users/:id` | admin | 删除用户（销毁所有容器） |

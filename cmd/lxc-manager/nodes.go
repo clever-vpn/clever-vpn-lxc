@@ -123,27 +123,26 @@ func addNode(rec *NodeRecord) error {
 
 func removeNode(nodeID string) error {
 	nodesMu.Lock()
-	defer nodesMu.Unlock()
-
 	rec, ok := nodes[nodeID]
+	nodesMu.Unlock()
 	if !ok {
 		return fmt.Errorf("node %s not found", nodeID)
 	}
 
-	// Clear node reference on all containers assigned to this node.
-	// Containers are NOT deleted — they become "lost" and the user can clean them up.
+	// Reject deletion if containers still assigned to this node
 	instMu.Lock()
-	for name, r := range instances {
+	var count int
+	for _, r := range instances {
 		if r.Node == nodeID {
-			r.Node = ""
-			r.Health = healthLost
-			r.StateReason = "node removed"
-			log.Printf("Container %s marked lost (node %s removed)", name, nodeID)
+			count++
 		}
 	}
 	instMu.Unlock()
-	saveInstances()
+	if count > 0 {
+		return fmt.Errorf("node %s still has %d container(s); migrate them first", nodeID, count)
+	}
 
+	nodesMu.Lock()
 	// Remove from region index
 	ids := regionNodes[rec.Region]
 	for i, id := range ids {
@@ -156,6 +155,7 @@ func removeNode(nodeID string) error {
 		delete(regionNodes, rec.Region)
 	}
 	delete(nodes, nodeID)
+	nodesMu.Unlock()
 	saveNodes()
 	removeNodeClient(nodeID)
 	return nil
@@ -344,8 +344,6 @@ func rebuildNode(nodeID string) error {
 	go func() {
 		recreateAllContainersOnNode(nodeID)
 
-		// Determine final status — collect container health outside nodesMu lock
-		// to avoid lock ordering inversion (nodesMu → instMu vs instMu → nodesMu).
 		allHealthy := true
 		instMu.Lock()
 		if hasContainers {
@@ -360,7 +358,6 @@ func rebuildNode(nodeID string) error {
 
 		nodesMu.Lock()
 		if n, ok := nodes[nodeID]; ok {
-			// Persist URL, network, image, and IPv6 so health checks don't fail after rebuild.
 			n.URL = fmt.Sprintf("https://%s:8443", n.SSHHost)
 			n.Network = "vpnbr0"
 			n.Image = "clever-vpn-base"
@@ -375,13 +372,9 @@ func rebuildNode(nodeID string) error {
 				n.StatusReason = "some containers failed to recover"
 			}
 		}
-		status := ""
-		if n, ok := nodes[nodeID]; ok {
-			status = n.Status
-		}
 		nodesMu.Unlock()
 		saveNodes()
-		log.Printf("Node %s rebuild complete (status=%s)", nodeID, status)
+		log.Printf("Node %s rebuild complete (status=%s)", nodeID, nodes[nodeID].Status)
 	}()
 
 	log.Printf("Node %s rebuild initiated, status=rebuilding", n.Name)
@@ -443,76 +436,17 @@ func recreateAllContainersOnNode(nodeID string) {
 				log.Printf("Rebuild %s: forward svc: %v", r.Name, err)
 				return
 			}
+			// Sync external IP info from current node record (may have changed after migration)
+			nodesMu.Lock()
+			if n, ok := nodes[nodeID]; ok {
+				r.NodePublicIP = n.SSHHost
+				r.NodePublicIPV4 = n.IPv4
+				r.NodePublicIPV6 = n.IPv6
+			}
+			nodesMu.Unlock()
 			r.State = "running"
 			saveInstances()
 			log.Printf("Rebuild: %s restored (ssh:%d→%s:22 svc:%d→%s:%d)",
-				r.Name, r.SSHExtPort, r.StaticIP, r.ServiceExtPort, r.StaticIP, r.ServicePort)
-		}(rec)
-	}
-}
-
-// recoverOrphanContainersByPublicIP is called after a node is added to
-// recreate any lost containers that previously belonged to the same IP.
-func recoverOrphanContainersByPublicIP(nodeID string, sshHost string) {
-	cli, err := getNodeClient(nodeID)
-	if err != nil {
-		log.Printf("Recovery: cannot connect to node %s: %v", nodeID, err)
-		return
-	}
-
-	instMu.Lock()
-	var toRecover []*InstanceRecord
-	for _, rec := range instances {
-		if rec.Node == "" && rec.Health == healthLost && rec.NodePublicIP == sshHost && rec.NodePublicIP != "" {
-			toRecover = append(toRecover, rec)
-			// Pre-claim ports
-			usedSSH[rec.SSHExtPort] = true
-			usedSvc[rec.ServiceExtPort] = true
-		}
-	}
-	instMu.Unlock()
-
-	if len(toRecover) == 0 {
-		return
-	}
-
-	log.Printf("Recovery: found %d lost container(s) for node %s (ip=%s)", len(toRecover), nodeID, sshHost)
-
-	img := env("LXC_BASE_IMAGE", "clever-vpn-base")
-	net := env("LXC_NETWORK", "vpnbr0")
-
-	for _, rec := range toRecover {
-		log.Printf("Recovery: rebuilding %s (cpu=%d mem=%dMB disk=%dGB ssh=%d svc=%d ip=%s)",
-			rec.Name, rec.CPU, rec.Mem, rec.Disk, rec.SSHExtPort, rec.ServiceExtPort, rec.StaticIP)
-
-		rec.Node = nodeID
-		rec.State = "creating"
-		saveInstances()
-
-		cloudConfig := mergeUserData(rec.UserData, rec.Name, bootstrapEnv(rec.Name, nodeID, rec.CPU, rec.Mem, rec.Disk,
-			PortInfo{SSH: rec.SSHExtPort, Service: rec.ServiceExtPort}), rec.Password)
-		if err := cli.CreateContainer(rec.Name, img, net, rec.StaticIP, rec.CPU, rec.Mem, rec.Disk,
-			map[string]string{"cloud-init.user-data": cloudConfig}); err != nil {
-			log.Printf("Recovery: failed to create %s: %v", rec.Name, err)
-			continue
-		}
-		if err := cli.StartContainer(rec.Name); err != nil {
-			log.Printf("Recovery: failed to start %s: %v", rec.Name, err)
-			continue
-		}
-
-		go func(r *InstanceRecord) {
-			if err := addPortForward(nodeID, r.SSHExtPort, r.StaticIP, 22); err != nil {
-				log.Printf("Recovery %s: forward ssh: %v", r.Name, err)
-				return
-			}
-			if err := addPortForward(nodeID, r.ServiceExtPort, r.StaticIP, r.ServicePort); err != nil {
-				log.Printf("Recovery %s: forward svc: %v", r.Name, err)
-				return
-			}
-			r.State = "running"
-			saveInstances()
-			log.Printf("Recovery: %s restored (ssh:%d→%s:22 svc:%d→%s:%d)",
 				r.Name, r.SSHExtPort, r.StaticIP, r.ServiceExtPort, r.StaticIP, r.ServicePort)
 		}(rec)
 	}
@@ -599,52 +533,6 @@ func getDefaultNodeClient() (string, *lxc.Client, error) {
 		return id, c, err
 	}
 	return "", nil, fmt.Errorf("no nodes available")
-}
-
-// cleanupOrphanContainers finds containers on a node that are not in our
-// registry and deletes them from LXD. This keeps the node clean when
-// the manager's state was lost (e.g., after redeploy with R2 restore).
-func cleanupOrphanContainers(nodeID string) {
-	cli, err := getNodeClient(nodeID)
-	if err != nil {
-		log.Printf("Orphan cleanup: cannot connect to node %s: %v", nodeID, err)
-		return
-	}
-
-	all, err := cli.ListContainers("user-")
-	if err != nil {
-		log.Printf("Orphan cleanup: cannot list containers on node %s: %v", nodeID, err)
-		return
-	}
-
-	instMu.Lock()
-	registered := map[string]bool{}
-	for name := range instances {
-		registered[name] = true
-	}
-	instMu.Unlock()
-
-	for _, c := range all {
-		if !registered[c.Name] {
-			log.Printf("Orphan cleanup: deleting %s from node %s (not in registry)", c.Name, nodeID)
-			if err := cli.DeleteContainer(c.Name); err != nil {
-				log.Printf("Orphan cleanup: failed to delete %s: %v", c.Name, err)
-			}
-		}
-	}
-}
-
-// parseIPLastOctet extracts the last octet from an IP like "10.0.1.100".
-func parseIPLastOctet(ip string) int {
-	parts := strings.Split(ip, ".")
-	if len(parts) != 4 {
-		return 0
-	}
-	n, err := strconv.Atoi(parts[3])
-	if err != nil {
-		return 0
-	}
-	return n
 }
 
 func sshConnect(host string, port int, password string) (*ssh.Client, error) {
