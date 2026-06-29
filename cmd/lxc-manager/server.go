@@ -1286,6 +1286,211 @@ func handleAdminRestartContainer(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, containerResponse(instances[name]))
 }
 
+// handleAdminMigrateContainer moves a container to a different node.
+// POST /api/admin/containers/{id}/migrate
+func handleAdminMigrateContainer(w http.ResponseWriter, r *http.Request) {
+	name := stripPrefix(strings.TrimSuffix(r.URL.Path, "/migrate"), "/api/admin/containers/")
+	if name == "" || strings.Contains(name, "/") {
+		jsonError(w, "name required", 400)
+		return
+	}
+
+	var req struct {
+		NodeID string `json:"nodeID"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.NodeID == "" {
+		jsonError(w, "nodeID required", 400)
+		return
+	}
+
+	instMu.Lock()
+	rec, exists := instances[name]
+	instMu.Unlock()
+	if !exists {
+		jsonError(w, "not found", 404)
+		return
+	}
+	if rec.Node == req.NodeID {
+		jsonError(w, "container is already on this node", 400)
+		return
+	}
+
+	nodesMu.Lock()
+	destNode, ok := nodes[req.NodeID]
+	nodesMu.Unlock()
+	if !ok {
+		jsonError(w, "target node not found", 404)
+		return
+	}
+	if destNode.Status != "active" {
+		jsonError(w, fmt.Sprintf("target node is %s", destNode.Status), 400)
+		return
+	}
+
+	destCli, err := getNodeClient(req.NodeID)
+	if err != nil {
+		jsonError(w, fmt.Sprintf("cannot connect to target node: %v", err), 500)
+		return
+	}
+
+	setState(name, "migrating", fmt.Sprintf("moving to node %s", req.NodeID))
+	instMu.Lock()
+	usedSSH[rec.SSHExtPort] = true
+	usedSvc[rec.ServiceExtPort] = true
+	instMu.Unlock()
+
+	go migrateContainer(name, rec, req.NodeID, destNode.Region, destCli)
+
+	log.Printf("Container migration initiated: %s → %s", name, req.NodeID)
+	instMu.Lock()
+	rec2, _ := instances[name]
+	instMu.Unlock()
+	jsonOK(w, containerResponse(rec2))
+}
+
+// migrateContainer performs the actual container migration asynchronously.
+func migrateContainer(name string, rec *InstanceRecord, destNodeID, destRegion string, destCli *lxc.Client) {
+	img := env("LXC_BASE_IMAGE", "clever-vpn-base")
+	net := env("LXC_NETWORK", "vpnbr0")
+
+	instMu.Lock()
+	delete(usedSSH, rec.SSHExtPort)
+	delete(usedSvc, rec.ServiceExtPort)
+	instMu.Unlock()
+
+	newSSH, err := func() (int, error) {
+		cursorMu.Lock()
+		defer cursorMu.Unlock()
+		p := allocateSSHPort()
+		if p == 0 {
+			return 0, fmt.Errorf("no free SSH port")
+		}
+		usedSSH[p] = true
+		return p, nil
+	}()
+	if err != nil {
+		instMu.Lock()
+		usedSSH[rec.SSHExtPort] = true
+		usedSvc[rec.ServiceExtPort] = true
+		instMu.Unlock()
+		setState(name, stateRunning, fmt.Sprintf("migrate: %v", err))
+		log.Printf("Migrate %s: %v", name, err)
+		return
+	}
+
+	newSvc, err := func() (int, error) {
+		cursorMu.Lock()
+		defer cursorMu.Unlock()
+		p := allocateSvcPort()
+		if p == 0 {
+			return 0, fmt.Errorf("no free service port")
+		}
+		usedSvc[p] = true
+		return p, nil
+	}()
+	if err != nil {
+		instMu.Lock()
+		delete(usedSSH, newSSH)
+		usedSSH[rec.SSHExtPort] = true
+		usedSvc[rec.ServiceExtPort] = true
+		instMu.Unlock()
+		setState(name, stateRunning, fmt.Sprintf("migrate: %v", err))
+		log.Printf("Migrate %s: %v", name, err)
+		return
+	}
+
+	newIP := allocateStaticIP(destNodeID)
+
+	ports := PortInfo{SSH: newSSH, Service: newSvc}
+	cloudConfig := mergeUserData(rec.UserData, name,
+		bootstrapEnv(name, destNodeID, rec.CPU, rec.Mem, rec.Disk, ports),
+		rec.Password)
+
+	if err := destCli.CreateContainer(name, img, net, newIP, rec.CPU, rec.Mem, rec.Disk,
+		map[string]string{"cloud-init.user-data": cloudConfig}); err != nil {
+		instMu.Lock()
+		delete(usedSSH, newSSH)
+		delete(usedSvc, newSvc)
+		usedSSH[rec.SSHExtPort] = true
+		usedSvc[rec.ServiceExtPort] = true
+		instMu.Unlock()
+		setState(name, stateRunning, fmt.Sprintf("migrate create: %v", err))
+		log.Printf("Migrate %s: create on dest: %v", name, err)
+		return
+	}
+
+	if err := destCli.StartContainer(name); err != nil {
+		destCli.DeleteContainer(name)
+		instMu.Lock()
+		delete(usedSSH, newSSH)
+		delete(usedSvc, newSvc)
+		usedSSH[rec.SSHExtPort] = true
+		usedSvc[rec.ServiceExtPort] = true
+		instMu.Unlock()
+		setState(name, stateRunning, fmt.Sprintf("migrate start: %v", err))
+		log.Printf("Migrate %s: start on dest: %v", name, err)
+		return
+	}
+
+	addPortForward(destNodeID, newSSH, newIP, 22)
+	addPortForward(destNodeID, newSvc, newIP, rec.ServicePort)
+
+	if rec.Node != "" {
+		if oldCli, err := getNodeClient(rec.Node); err == nil {
+			cleanupContainerLXD(name, rec.Node, oldCli, rec.SSHExtPort, rec.ServiceExtPort, rec.StaticIP, rec.ServicePort)
+		} else {
+			log.Printf("Migrate %s: old node %s unreachable, skipping cleanup", name, rec.Node)
+		}
+	}
+
+	nodesMu.Lock()
+	dest, _ := nodes[destNodeID]
+	nodesMu.Unlock()
+
+	instMu.Lock()
+	if r, ok := instances[name]; ok {
+		r.Node = destNodeID
+		r.Region = destRegion
+		r.SSHExtPort = newSSH
+		r.ServiceExtPort = newSvc
+		r.StaticIP = newIP
+		if dest != nil {
+			r.NodePublicIP = dest.SSHHost
+			r.NodePublicIPV4 = dest.IPv4
+			r.NodePublicIPV6 = dest.IPv6
+		}
+		r.State = stateRunning
+		r.Health = ""
+		r.StateReason = ""
+	}
+	instMu.Unlock()
+	saveInstances()
+
+	log.Printf("Migrate: %s moved to %s (ssh=%d→%d svc=%d→%d ip=%s region=%s)",
+		name, destNodeID, rec.SSHExtPort, newSSH, rec.ServiceExtPort, newSvc, newIP, destRegion)
+}
+
+// cleanupContainerLXD stops and deletes a container from LXD without touching
+// the instance registry. Used by migration to remove the old container.
+func cleanupContainerLXD(name, nodeID string, cli *lxc.Client, sshPort, svcPort int, staticIP string, servicePort int) {
+	delPortForward(nodeID, sshPort, staticIP, 22)
+	delPortForward(nodeID, svcPort, staticIP, servicePort)
+	container, err := cli.GetContainer(name)
+	if err != nil {
+		log.Printf("  cleanup %s: get container: %v", name, err)
+		return
+	}
+	if !strings.EqualFold(container.Status, "Stopped") {
+		if err := cli.StopContainer(name); err != nil {
+			log.Printf("  cleanup %s: stop: %v", name, err)
+		}
+	}
+	if err := cli.DeleteContainer(name); err != nil {
+		log.Printf("  cleanup %s: delete: %v", name, err)
+	}
+	log.Printf("  cleanup %s: old container removed from node %s", name, nodeID)
+}
+
 // ==================== Node Handlers ====================
 
 func handleNodeAdd(w http.ResponseWriter, r *http.Request) {
@@ -1348,9 +1553,6 @@ func handleNodeAdd(w http.ResponseWriter, r *http.Request) {
 				n.Image = provisioned.Image
 				n.Status = "active"
 				log.Printf("Node %s ready: %s (region=%s)", rec.ID, n.URL, rec.Region)
-				// Clean up orphan containers and recover lost ones
-				go cleanupOrphanContainers(rec.ID)
-				go recoverOrphanContainersByPublicIP(rec.ID, req.SSHHost)
 			}
 		}
 		nodesMu.Unlock()
@@ -1901,6 +2103,12 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		handleAdminRestartContainer(w, r)
+	case strings.HasPrefix(p, "/api/admin/containers/") && strings.HasSuffix(p, "/migrate") && r.Method == "POST":
+		if !validateAdmin(r) {
+			jsonError(w, "unauthorized", 401)
+			return
+		}
+		handleAdminMigrateContainer(w, r)
 	case strings.HasPrefix(p, "/api/admin/containers/") && strings.HasSuffix(p, "/refresh") && r.Method == "POST":
 		if !validateAdmin(r) {
 			jsonError(w, "unauthorized", 401)
