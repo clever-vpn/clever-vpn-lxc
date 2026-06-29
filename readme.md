@@ -59,7 +59,8 @@ lxc-manager install --domain your-domain.com
 | `GET` | `/api/regions` | 无 | 可用区域列表 |
 | `POST` | `/api/nodes` | admin | 添加节点 |
 | `GET` | `/api/nodes` | admin | 列出节点 |
-| `PUT` | `/api/nodes/:id` | admin | 更新节点（状态/最大容器数） |
+| `PUT` | `/api/nodes/:id` | admin | 更新节点配置（密码/端口/池大小/容量） |
+| `POST` | `/api/nodes/:id/migrate` | admin | 迁移节点到新机器 |
 | `POST` | `/api/nodes/:id/rebuild` | admin | 重建节点（重新初始化并恢复容器） |
 | `GET` | `/api/nodes/:id/containers` | admin | 节点上所有容器 |
 | `DELETE` | `/api/nodes/:id` | admin | 删除节点 |

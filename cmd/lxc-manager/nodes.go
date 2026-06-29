@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -878,4 +879,329 @@ func nodeIPTables(nodeID, action, extPort, dstIP, dstPort string) error {
 		}
 	}
 	return nil
+}
+
+// ==================== Node Migration ====================
+
+// MigrateResult holds the outcome of a node migration.
+type MigrateResult struct {
+	NewNodeID  string   `json:"newNodeID"`
+	Moved      int      `json:"moved"`
+	Failed     int      `json:"failed"`
+	FailedList []string `json:"failedList"`
+}
+
+// handleNodeMigrate migrates all containers from a source node to a new node.
+// POST /api/nodes/{id}/migrate
+//
+// Body:
+//
+//	{
+//	  "sshHost":     "192.168.1.100",     // required
+//	  "sshPassword": "...",               // required
+//	  "sshPort":     22,                   // optional, default 22
+//	  "poolSize":    "15"                  // optional, default from config
+//	}
+//
+// Response (202):
+//
+//	{
+//	  "status":    "migrating",
+//	  "newNodeID": "nd_xxx",
+//	  "name":      "tokyo-2",
+//	  "region":    "jp-tokyo"
+//	}
+func handleNodeMigrate(w http.ResponseWriter, r *http.Request) {
+	sourceNodeID := stripPrefix(strings.TrimSuffix(r.URL.Path, "/migrate"), "/api/nodes/")
+	if sourceNodeID == "" {
+		jsonError(w, "source node id required", 400)
+		return
+	}
+
+	var req struct {
+		SSHHost     string     `json:"sshHost"`
+		SSHPassword string     `json:"sshPassword"`
+		SSHPort     flexInt    `json:"sshPort"`
+		PoolSize    flexString `json:"poolSize"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid body", 400)
+		return
+	}
+	if req.SSHHost == "" || req.SSHPassword == "" {
+		jsonError(w, "sshHost and sshPassword required", 400)
+		return
+	}
+	if req.SSHPort == 0 {
+		req.SSHPort = 22
+	}
+	ps := string(req.PoolSize)
+	if ps == "" {
+		ps = cfg.StoragePoolSize
+	}
+
+	// Validate source node
+	nodesMu.Lock()
+	src, ok := nodes[sourceNodeID]
+	nodesMu.Unlock()
+	if !ok {
+		jsonError(w, "source node not found", 404)
+		return
+	}
+	if src.Status != "active" && src.Status != "degraded" {
+		jsonError(w, fmt.Sprintf("source node must be active or degraded, current: %s", src.Status), 400)
+		return
+	}
+
+	// Register destination node immediately with "migrating" status
+	destName := src.Name + "-migrate"
+	destRec := &NodeRecord{
+		Name:          destName,
+		Region:        src.Region,
+		SSHHost:       req.SSHHost,
+		SSHPort:       int(req.SSHPort),
+		SSHPassword:   req.SSHPassword,
+		PoolSize:      ps,
+		Status:        "migrating",
+		MaxContainers: src.MaxContainers,
+	}
+	if err := addNode(destRec); err != nil {
+		jsonError(w, fmt.Sprintf("register destination node: %v", err), 500)
+		return
+	}
+
+	// Migrate asynchronously
+	go migrateNode(sourceNodeID, destRec, src.Region, req.SSHHost, int(req.SSHPort), req.SSHPassword, ps)
+
+	log.Printf("Node migration initiated: %s → %s (%s:%d, region=%s)", sourceNodeID, destRec.ID, req.SSHHost, int(req.SSHPort), src.Region)
+	jsonOK(w, map[string]interface{}{
+		"status":    "migrating",
+		"newNodeID": destRec.ID,
+		"name":      destRec.Name,
+		"region":    src.Region,
+	})
+}
+
+// migrateNode performs the full node migration asynchronously.
+func migrateNode(sourceNodeID string, destRec *NodeRecord, region string, destHost string, destPort int, destPassword string, poolSize string) {
+	destNodeID := destRec.ID
+
+	// 1. Provision the destination node
+	provisioned, err := provisionNode(destRec.Name, region, destHost, destPort, destPassword, poolSize)
+	nodesMu.Lock()
+	if n, ok := nodes[destNodeID]; ok {
+		if err != nil {
+			n.Status = "degraded"
+			n.StatusReason = fmt.Sprintf("provision failed: %v", err)
+			nodesMu.Unlock()
+			saveNodes()
+			log.Printf("Migrate: destination node %s provision failed: %v", destNodeID, err)
+			return
+		}
+		n.URL = provisioned.URL
+		n.Network = provisioned.Network
+		n.Image = provisioned.Image
+		n.IPv4 = provisioned.IPv4
+		n.IPv6 = provisioned.IPv6
+		n.Status = "migrating"
+	}
+	nodesMu.Unlock()
+	saveNodes()
+
+	log.Printf("Migrate: destination node %s provisioned (%s)", destNodeID, destHost)
+
+	// 2. Get destination LXD client
+	destCli, err := getNodeClient(destNodeID)
+	if err != nil {
+		setNodeStatus(destNodeID, "degraded", fmt.Sprintf("cannot connect: %v", err))
+		log.Printf("Migrate: cannot connect to destination %s: %v", destNodeID, err)
+		return
+	}
+
+	// 3. Get all containers on source node
+	instMu.Lock()
+	var toMigrate []*InstanceRecord
+	for _, rec := range instances {
+		if rec.Node == sourceNodeID {
+			toMigrate = append(toMigrate, rec)
+		}
+	}
+	instMu.Unlock()
+
+	if len(toMigrate) == 0 {
+		// No containers to migrate — mark destination active, remove source
+		nodesMu.Lock()
+		if n, ok := nodes[destNodeID]; ok {
+			n.Status = "active"
+		}
+		nodesMu.Unlock()
+		saveNodes()
+		removeNode(sourceNodeID)
+		log.Printf("Migrate: no containers on source %s, migration complete", sourceNodeID)
+		return
+	}
+
+	log.Printf("Migrate: moving %d container(s) from %s to %s", len(toMigrate), sourceNodeID, destNodeID)
+
+	img := env("LXC_BASE_IMAGE", "clever-vpn-base")
+	net := env("LXC_NETWORK", "vpnbr0")
+
+	var moved, failed int
+	var failedList []string
+
+	for _, rec := range toMigrate {
+		log.Printf("Migrate: moving %s (user=%s cpu=%d mem=%dMB disk=%dGB servicePort=%d)",
+			rec.Name, rec.UserID, rec.CPU, rec.Mem, rec.Disk, rec.ServicePort)
+
+		// Allocate new ports and IP for destination node
+		// Release old ports so they can be reused
+		instMu.Lock()
+		delete(usedSSH, rec.SSHExtPort)
+		delete(usedSvc, rec.ServiceExtPort)
+		instMu.Unlock()
+
+		newSSH, err := func() (int, error) {
+			cursorMu.Lock()
+			defer cursorMu.Unlock()
+			p := allocateSSHPort()
+			if p == 0 {
+				return 0, fmt.Errorf("no free SSH port")
+			}
+			usedSSH[p] = true
+			return p, nil
+		}()
+		if err != nil {
+			// Reclaim old ports
+			instMu.Lock()
+			usedSSH[rec.SSHExtPort] = true
+			usedSvc[rec.ServiceExtPort] = true
+			instMu.Unlock()
+			failed++
+			failedList = append(failedList, rec.Name)
+			log.Printf("Migrate: %s: %v", rec.Name, err)
+			continue
+		}
+
+		newSvc, err := func() (int, error) {
+			cursorMu.Lock()
+			defer cursorMu.Unlock()
+			p := allocateSvcPort()
+			if p == 0 {
+				return 0, fmt.Errorf("no free service port")
+			}
+			usedSvc[p] = true
+			return p, nil
+		}()
+		if err != nil {
+			// Rollback SSH port
+			instMu.Lock()
+			delete(usedSSH, newSSH)
+			usedSSH[rec.SSHExtPort] = true
+			usedSvc[rec.ServiceExtPort] = true
+			instMu.Unlock()
+			failed++
+			failedList = append(failedList, rec.Name)
+			log.Printf("Migrate: %s: %v", rec.Name, err)
+			continue
+		}
+
+		newIP := allocateStaticIP(destNodeID)
+
+		// Build cloud-config with new node's IPs
+		ports := PortInfo{SSH: newSSH, Service: newSvc}
+		cloudConfig := mergeUserData(rec.UserData, rec.Name,
+			bootstrapEnv(rec.Name, destNodeID, rec.CPU, rec.Mem, rec.Disk, ports),
+			rec.Password)
+
+		// Create container on destination
+		if err := destCli.CreateContainer(rec.Name, img, net, newIP, rec.CPU, rec.Mem, rec.Disk,
+			map[string]string{"cloud-init.user-data": cloudConfig}); err != nil {
+			// Rollback port allocation
+			instMu.Lock()
+			delete(usedSSH, newSSH)
+			delete(usedSvc, newSvc)
+			usedSSH[rec.SSHExtPort] = true
+			usedSvc[rec.ServiceExtPort] = true
+			instMu.Unlock()
+			failed++
+			failedList = append(failedList, rec.Name)
+			log.Printf("Migrate: create %s on dest: %v", rec.Name, err)
+			continue
+		}
+
+		if err := destCli.StartContainer(rec.Name); err != nil {
+			destCli.DeleteContainer(rec.Name)
+			instMu.Lock()
+			delete(usedSSH, newSSH)
+			delete(usedSvc, newSvc)
+			usedSSH[rec.SSHExtPort] = true
+			usedSvc[rec.ServiceExtPort] = true
+			instMu.Unlock()
+			failed++
+			failedList = append(failedList, rec.Name)
+			log.Printf("Migrate: start %s on dest: %v", rec.Name, err)
+			continue
+		}
+
+		// Set up DNAT on destination
+		if err := addPortForward(destNodeID, newSSH, newIP, 22); err != nil {
+			log.Printf("Migrate: %s forward ssh: %v", rec.Name, err)
+		}
+		if err := addPortForward(destNodeID, newSvc, newIP, rec.ServicePort); err != nil {
+			log.Printf("Migrate: %s forward svc: %v", rec.Name, err)
+		}
+
+		// Destroy old container on source
+		destroyContainer(rec.Name)
+
+		// Update InstanceRecord to point to destination
+		nodesMu.Lock()
+		dest, _ := nodes[destNodeID]
+		nodesMu.Unlock()
+
+		instMu.Lock()
+		if r, ok := instances[rec.Name]; ok {
+			r.Node = destNodeID
+			r.Region = region
+			r.SSHExtPort = newSSH
+			r.ServiceExtPort = newSvc
+			r.StaticIP = newIP
+			r.State = stateRunning
+			r.Health = ""
+			if dest != nil {
+				r.NodePublicIP = dest.SSHHost
+				r.NodePublicIPV4 = dest.IPv4
+				r.NodePublicIPV6 = dest.IPv6
+			}
+		}
+		instMu.Unlock()
+		saveInstances()
+
+		moved++
+		log.Printf("Migrate: %s moved (ssh=%d→%d svc=%d→%d ip=%s)",
+			rec.Name, rec.SSHExtPort, newSSH, rec.ServiceExtPort, newSvc, newIP)
+	}
+
+	// 4. Finalize
+	nodesMu.Lock()
+	if n, ok := nodes[destNodeID]; ok {
+		if failed == 0 {
+			n.Status = "active"
+		} else {
+			n.Status = "degraded"
+			n.StatusReason = fmt.Sprintf("migration: %d moved, %d failed", moved, failed)
+		}
+	}
+	nodesMu.Unlock()
+	saveNodes()
+
+	// Remove source node if all containers moved
+	if failed == 0 {
+		removeNode(sourceNodeID)
+		log.Printf("Migrate: source node %s removed (all %d containers moved)", sourceNodeID, moved)
+	} else {
+		log.Printf("Migrate: source node %s kept (%d moved, %d failed: %v)", sourceNodeID, moved, failed, failedList)
+	}
+
+	log.Printf("Migrate: complete. %s → %s (moved=%d failed=%d)", sourceNodeID, destNodeID, moved, failed)
 }

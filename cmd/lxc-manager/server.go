@@ -1811,6 +1811,12 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		handleNodeDelete(w, r)
+	case strings.HasPrefix(p, "/api/nodes/") && strings.HasSuffix(p, "/migrate") && r.Method == "POST":
+		if !validateAdmin(r) {
+			jsonError(w, "unauthorized", 401)
+			return
+		}
+		handleNodeMigrate(w, r)
 	case strings.HasPrefix(p, "/api/nodes/") && strings.HasSuffix(p, "/rebuild") && r.Method == "POST":
 		if !validateAdmin(r) {
 			jsonError(w, "unauthorized", 401)
@@ -2113,7 +2119,10 @@ func bootstrapEnv(name, nodeID string, cpu, mem, disk int, ports PortInfo) strin
 		envLine("INSTANCE_DISK_GB", strconv.Itoa(disk)),
 		envLine("INSTANCE_SSH_PORT", strconv.Itoa(ports.SSH)),
 		envLine("INSTANCE_SERVICE_PORT", strconv.Itoa(ports.Service)),
-		envLine("INSTANCE_PUBLIC_IP", getNodePublicIP(nodeID)),
+		envLine("INSTANCE_SSH_HOST", getNodePublicIP(nodeID)),
+		envLine("INSTANCE_PUBLIC_IPV4", getNodePublicIPv4(nodeID)),
+		envLine("INSTANCE_PUBLIC_IPV6", getNodePublicIPv6(nodeID)),
+		envLine("INSTANCE_TYPE", "clever-vpn-lxc"),
 	}, "\n") + "\n"
 }
 
