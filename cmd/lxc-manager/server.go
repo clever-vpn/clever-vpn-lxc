@@ -136,6 +136,7 @@ type InstanceRecord struct {
 	NodePublicIPV4 string    `json:"nodePublicIPV4,omitempty"`
 	NodePublicIPV6 string    `json:"nodePublicIPV6,omitempty"`
 	UserData       string    `json:"userData,omitempty"`
+	PlanID         string    `json:"planID,omitempty"`
 	Created        time.Time `json:"created"`
 	State          string    `json:"state"`
 	Health         string    `json:"health,omitempty"`
@@ -684,6 +685,7 @@ func createContainerCore(userID string, userData string, cpu, mem, disk, service
 		Region:      region,
 		State:       stateCreating,
 		UserData:    userData,
+		PlanID:      planID,
 		Label:       label,
 	}
 
@@ -2310,6 +2312,7 @@ func containerResponse(rec *InstanceRecord) map[string]interface{} {
 		"state":          rec.State,
 		"health":         rec.Health,
 		"terminalUrl":    fmt.Sprintf("https://%s/terminal/%s", cfg.Domain, rec.Name),
+		"planID":         rec.PlanID,
 		"label":          rec.Label,
 		"userData":       rec.UserData,
 		"password":       rec.Password,
