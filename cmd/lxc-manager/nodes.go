@@ -49,6 +49,10 @@ var (
 
 	pool   = map[string]*lxc.Client{}
 	poolMu sync.Mutex
+
+	// SSH connection pool — one persistent connection per node.
+	sshPool   = map[string]*ssh.Client{}
+	sshPoolMu sync.Mutex
 )
 
 func generateNodeID() string {
@@ -277,12 +281,11 @@ func rebuildNode(nodeID string) error {
 	setNodeStatus(nodeID, "rebuilding", "administrator requested rebuild")
 
 	// SSH to the node and run the idempotent node-setup.sh
-	client, err := sshConnect(n.SSHHost, n.SSHPort, n.SSHPassword)
+	client, err := getSSHClient(nodeID)
 	if err != nil {
 		setNodeStatus(nodeID, "degraded", fmt.Sprintf("ssh: %v", err))
 		return fmt.Errorf("ssh connect: %w", err)
 	}
-	defer client.Close()
 
 	// Wait for LXD
 	sshExec(client, "for i in $(seq 1 60); do lxc storage list &>/dev/null 2>&1 && break; sleep 2; done")
@@ -517,6 +520,71 @@ func removeNodeClient(nodeID string) {
 	delete(pool, nodeID)
 }
 
+// getSSHClient returns a pooled SSH client for the given node.
+// The connection is kept alive and reused across all SSH operations (iptables, etc.).
+func getSSHClient(nodeID string) (*ssh.Client, error) {
+	sshPoolMu.Lock()
+	if c, ok := sshPool[nodeID]; ok {
+		// Verify connection is still alive
+		_, _, err := c.Conn.SendRequest("keepalive@openssh.com", true, nil)
+		if err == nil {
+			sshPoolMu.Unlock()
+			return c, nil
+		}
+		// Dead connection, close and remove
+		c.Close()
+		delete(sshPool, nodeID)
+	}
+	sshPoolMu.Unlock()
+
+	nodesMu.Lock()
+	n, ok := nodes[nodeID]
+	nodesMu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("node %s not found", nodeID)
+	}
+
+	client, err := sshConnect(n.SSHHost, n.SSHPort, n.SSHPassword)
+	if err != nil {
+		return nil, err
+	}
+
+	sshPoolMu.Lock()
+	sshPool[nodeID] = client
+	sshPoolMu.Unlock()
+
+	// Background keepalive every 30s
+	go sshKeepalive(nodeID, client)
+
+	return client, nil
+}
+
+func removeSSHClient(nodeID string) {
+	sshPoolMu.Lock()
+	defer sshPoolMu.Unlock()
+	if c, ok := sshPool[nodeID]; ok {
+		c.Close()
+		delete(sshPool, nodeID)
+	}
+}
+
+func sshKeepalive(nodeID string, client *ssh.Client) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		_, _, err := client.Conn.SendRequest("keepalive@openssh.com", true, nil)
+		if err != nil {
+			sshPoolMu.Lock()
+			if sshPool[nodeID] == client {
+				client.Close()
+				delete(sshPool, nodeID)
+			}
+			sshPoolMu.Unlock()
+			return
+		}
+	}
+}
+
 func getDefaultClient() (*lxc.Client, error) {
 	if len(nodes) == 0 {
 		return nil, fmt.Errorf("no nodes registered, add a node first: lxc-manager add-node")
@@ -701,19 +769,11 @@ func delRemotePortForward(nodeID string, extPort int, dstIP string, dstPort int)
 
 // flushPortRules removes all DNAT rules for a given port on a remote node.
 func flushPortRules(nodeID, extPort string) {
-	nodesMu.Lock()
-	n, ok := nodes[nodeID]
-	nodesMu.Unlock()
-	if !ok {
-		return
-	}
-
-	client, err := sshConnect(n.SSHHost, n.SSHPort, n.SSHPassword)
+	client, err := getSSHClient(nodeID)
 	if err != nil {
-		log.Printf("flush port %s on %s: ssh: %v", extPort, n.SSHHost, err)
+		log.Printf("flush port %s on %s: ssh: %v", extPort, nodeID, err)
 		return
 	}
-	defer client.Close()
 
 	for _, chain := range []string{"PREROUTING", "OUTPUT"} {
 		// List all DNAT rules for this port (any protocol) and delete them
@@ -735,18 +795,10 @@ func flushPortRules(nodeID, extPort string) {
 
 // nodeIPTables runs iptables DNAT commands on a remote node via SSH.
 func nodeIPTables(nodeID, action, extPort, dstIP, dstPort string) error {
-	nodesMu.Lock()
-	n, ok := nodes[nodeID]
-	nodesMu.Unlock()
-	if !ok {
-		return fmt.Errorf("node %s not found", nodeID)
-	}
-
-	client, err := sshConnect(n.SSHHost, n.SSHPort, n.SSHPassword)
+	client, err := getSSHClient(nodeID)
 	if err != nil {
-		return fmt.Errorf("ssh to %s: %w", n.SSHHost, err)
+		return fmt.Errorf("ssh to %s: %w", nodeID, err)
 	}
-	defer client.Close()
 
 	target := fmt.Sprintf("%s:%s", dstIP, dstPort)
 	for _, proto := range []string{"tcp", "udp"} {
@@ -767,7 +819,7 @@ func nodeIPTables(nodeID, action, extPort, dstIP, dstPort string) error {
 				action, chain, proto, extPort, target)
 			out, err = sshExec(client, addCmd)
 			if err != nil && action == "-A" {
-				return fmt.Errorf("iptables %s: %w\n%s", n.SSHHost, err, out)
+				return fmt.Errorf("iptables %s: %w\n%s", nodeID, err, out)
 			}
 		}
 	}
@@ -849,8 +901,9 @@ func handleNodeMigrate(w http.ResponseWriter, r *http.Request) {
 	n.IPv6 = ""
 	n.URL = fmt.Sprintf("https://%s:8443", req.SSHHost)
 	saveNodes()
-	// Force new LXD client connection for the new machine
+	// Force new LXD client and SSH connection for the new machine
 	removeNodeClient(nodeID)
+	removeSSHClient(nodeID)
 
 	// 2. Mark all containers on this node for rebuild
 	instMu.Lock()
