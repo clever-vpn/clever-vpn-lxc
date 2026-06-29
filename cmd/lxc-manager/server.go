@@ -572,6 +572,46 @@ func recoverInstances() {
 
 // ==================== Container Handlers ====================
 
+// createContainerOnNode is the single entry point for creating a container on a
+// node. It handles cloud-config, LXD create+start, DNAT, and state update.
+// Used by: createContainerCore, recreateAllContainersOnNode, migrateContainer.
+func createContainerOnNode(cli *lxc.Client, nodeID string, rec *InstanceRecord, ports PortInfo, staticIP string) error {
+	img := env("LXC_BASE_IMAGE", "clever-vpn-base")
+	net := env("LXC_NETWORK", "vpnbr0")
+
+	cloudConfig := mergeUserData(rec.UserData, rec.Name,
+		bootstrapEnv(rec.Name, nodeID, rec.CPU, rec.Mem, rec.Disk, ports),
+		rec.Password)
+
+	if err := cli.CreateContainer(rec.Name, img, net, staticIP, rec.CPU, rec.Mem, rec.Disk,
+		map[string]string{"cloud-init.user-data": cloudConfig}); err != nil {
+		return fmt.Errorf("create: %w", err)
+	}
+	if err := cli.StartContainer(rec.Name); err != nil {
+		cli.DeleteContainer(rec.Name)
+		return fmt.Errorf("start: %w", err)
+	}
+
+	batchAddPortForwards(nodeID,
+		[3]string{strconv.Itoa(ports.SSH), staticIP, "22"},
+		[3]string{strconv.Itoa(ports.Service), staticIP, strconv.Itoa(rec.ServicePort)},
+	)
+
+	// Sync external IP info from current node record
+	nodesMu.Lock()
+	if n, ok := nodes[nodeID]; ok {
+		rec.NodePublicIP = n.SSHHost
+		rec.NodePublicIPV4 = n.IPv4
+		rec.NodePublicIPV6 = n.IPv6
+	}
+	nodesMu.Unlock()
+
+	rec.State = stateRunning
+	rec.Health = ""
+	saveInstances()
+	return nil
+}
+
 // createContainerCore handles the shared container creation flow.
 // Returns the instance record and port info on success.
 func createContainerCore(userID string, userData string, cpu, mem, disk, servicePort int, region string, planID string, label string) (*InstanceRecord, PortInfo, error) {
@@ -632,8 +672,6 @@ func createContainerCore(userID string, userData string, cpu, mem, disk, service
 	}
 
 	name := env("LXC_NAME_PREFIX", "user-") + generateUUID()
-	img := env("LXC_BASE_IMAGE", "clever-vpn-base")
-	net := env("LXC_NETWORK", "vpnbr0")
 
 	rec := &InstanceRecord{
 		Name:        name,
@@ -669,31 +707,12 @@ func createContainerCore(userID string, userData string, cpu, mem, disk, service
 	log.Printf("Creating %s (user=%s region=%s node=%s cpu=%d mem=%dMB disk=%dGB ssh=%d svc=%d ip=%s)",
 		name, userID, region, nodeID, cpu, mem, disk, ports.SSH, ports.Service, rec.StaticIP)
 
-	cloudConfig := mergeUserData(userData, name, bootstrapEnv(name, nodeID, cpu, mem, disk, ports), password)
-	if err := cli.CreateContainer(name, img, net, rec.StaticIP, cpu, mem, disk, map[string]string{"cloud-init.user-data": cloudConfig}); err != nil {
+	if err := createContainerOnNode(cli, nodeID, rec, ports, rec.StaticIP); err != nil {
 		unregisterInstance(name)
-		setNodeStatus(nodeID, "degraded", fmt.Sprintf("create failed: %v", err))
-		return nil, PortInfo{}, fmt.Errorf("create: %v", err)
+		setNodeStatus(nodeID, "degraded", err.Error())
+		return nil, PortInfo{}, err
 	}
-	if err := cli.StartContainer(name); err != nil {
-		unregisterInstance(name)
-		setNodeStatus(nodeID, "degraded", fmt.Sprintf("start failed: %v", err))
-		return nil, PortInfo{}, fmt.Errorf("start: %v", err)
-	}
-	setState(name, stateRunning, "")
-
-	// Port forwarding uses known static IP — no need to wait
-	go func() {
-		if err := addPortForward(nodeID, ports.SSH, rec.StaticIP, 22); err != nil {
-			log.Printf("%s: forward ssh: %v", name, err)
-			return
-		}
-		if err := addPortForward(nodeID, ports.Service, rec.StaticIP, servicePort); err != nil {
-			log.Printf("%s: forward svc: %v", name, err)
-			return
-		}
-		log.Printf("Ports: ssh=%d, svc=%d -> %s", ports.SSH, ports.Service, rec.StaticIP)
-	}()
+	log.Printf("Ports: ssh=%d, svc=%d -> %s", ports.SSH, ports.Service, rec.StaticIP)
 
 	return rec, ports, nil
 }
@@ -1351,8 +1370,6 @@ func handleAdminMigrateContainer(w http.ResponseWriter, r *http.Request) {
 // migrateContainer performs the actual container migration asynchronously.
 func migrateContainer(name string, rec *InstanceRecord, destNodeID, destRegion string, destCli *lxc.Client) {
 	t0 := time.Now()
-	img := env("LXC_BASE_IMAGE", "clever-vpn-base")
-	net := env("LXC_NETWORK", "vpnbr0")
 
 	instMu.Lock()
 	delete(usedSSH, rec.SSHExtPort)
@@ -1404,51 +1421,31 @@ func migrateContainer(name string, rec *InstanceRecord, destNodeID, destRegion s
 	log.Printf("Migrate %s: ports+IP allocated in %.1fs (ssh=%d svc=%d ip=%s)", name, time.Since(t0).Seconds(), newSSH, newSvc, newIP)
 
 	ports := PortInfo{SSH: newSSH, Service: newSvc}
-	cloudConfig := mergeUserData(rec.UserData, name,
-		bootstrapEnv(name, destNodeID, rec.CPU, rec.Mem, rec.Disk, ports),
-		rec.Password)
+
+	// Temporarily set new ports on rec so createContainerOnNode uses them
+	origSSH, origSvc := rec.SSHExtPort, rec.ServiceExtPort
+	rec.SSHExtPort = newSSH
+	rec.ServiceExtPort = newSvc
 
 	t1 := time.Now()
-	if err := destCli.CreateContainer(name, img, net, newIP, rec.CPU, rec.Mem, rec.Disk,
-		map[string]string{"cloud-init.user-data": cloudConfig}); err != nil {
+	if err := createContainerOnNode(destCli, destNodeID, rec, ports, newIP); err != nil {
+		rec.SSHExtPort, rec.ServiceExtPort = origSSH, origSvc
 		instMu.Lock()
 		delete(usedSSH, newSSH)
 		delete(usedSvc, newSvc)
-		usedSSH[rec.SSHExtPort] = true
-		usedSvc[rec.ServiceExtPort] = true
+		usedSSH[origSSH] = true
+		usedSvc[origSvc] = true
 		instMu.Unlock()
-		setState(name, stateRunning, fmt.Sprintf("migrate create: %v", err))
-		log.Printf("Migrate %s: create on dest: %v", name, err)
+		setState(name, stateRunning, fmt.Sprintf("migrate: %v", err))
+		log.Printf("Migrate %s: %v", name, err)
 		return
 	}
-	log.Printf("Migrate %s: create done in %.1fs", name, time.Since(t1).Seconds())
-
-	t1 = time.Now()
-	if err := destCli.StartContainer(name); err != nil {
-		destCli.DeleteContainer(name)
-		instMu.Lock()
-		delete(usedSSH, newSSH)
-		delete(usedSvc, newSvc)
-		usedSSH[rec.SSHExtPort] = true
-		usedSvc[rec.ServiceExtPort] = true
-		instMu.Unlock()
-		setState(name, stateRunning, fmt.Sprintf("migrate start: %v", err))
-		log.Printf("Migrate %s: start on dest: %v", name, err)
-		return
-	}
-	log.Printf("Migrate %s: start done in %.1fs", name, time.Since(t1).Seconds())
-
-	t1 = time.Now()
-	batchAddPortForwards(destNodeID,
-		[3]string{strconv.Itoa(newSSH), newIP, "22"},
-		[3]string{strconv.Itoa(newSvc), newIP, strconv.Itoa(rec.ServicePort)},
-	)
-	log.Printf("Migrate %s: DNAT done in %.1fs", name, time.Since(t1).Seconds())
+	log.Printf("Migrate %s: create+start+DNAT done in %.1fs", name, time.Since(t1).Seconds())
 
 	t1 = time.Now()
 	if rec.Node != "" {
 		if oldCli, err := getNodeClient(rec.Node); err == nil {
-			cleanupContainerLXD(name, rec.Node, oldCli, rec.SSHExtPort, rec.ServiceExtPort, rec.StaticIP, rec.ServicePort)
+			cleanupContainerLXD(name, rec.Node, oldCli, origSSH, origSvc, rec.StaticIP, rec.ServicePort)
 		} else {
 			log.Printf("Migrate %s: old node %s unreachable, skipping cleanup", name, rec.Node)
 		}
