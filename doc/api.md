@@ -385,7 +385,7 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 | `poolSize` | string | btrfs 存储池大小 |
 | `status` | string | `creating` / `active` / `rebuilding` / `degraded` / `offline` |
 | `statusReason` | string | 状态原因（非正常状态时） |
-| `maxContainers` | int | 最大容器数，0 = 不限制 |
+| `maxContainers` | int | 最大容器数限制，0 = drain（不接受新容器），不传 = 不限制 |
 | `ipv4` | string | 自动检测的公网 IPv4（provision/rebuild 时检测） |
 | `ipv6` | string | 自动检测的公网 IPv6（provision/rebuild 时检测） |
 
@@ -409,7 +409,7 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `maxContainers` | int | 最大容器数，0 = 不限制 |
+| `maxContainers` | int | 最大容器数，0 = drain（不接受新容器），不传 = 不改 |
 | `sshPassword` | string | SSH 密码（重装系统后更新） |
 | `sshPort` | int | SSH 端口 |
 | `poolSize` | string | btrfs 存储池大小（GiB） |
