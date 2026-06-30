@@ -174,8 +174,9 @@ func checkContainer(name string) {
 	}
 
 	if c.Status != "Running" {
-		// Container exists but is not running — unexpected for a running container.
-		setHealth(name, healthUnhealthy, "status is "+c.Status)
+		// Container exists but is not running — it genuinely stopped (halt, crash, etc).
+		// Update state to reflect reality rather than just reporting unhealthy.
+		setState(name, stateStopped, "actually "+c.Status+" (detected by health check)")
 		return
 	}
 
