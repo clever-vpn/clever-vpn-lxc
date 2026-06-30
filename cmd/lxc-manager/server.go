@@ -994,11 +994,11 @@ func handleRefreshContainer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check node health first, then container health
+	// Trigger health check in background — don't block the response.
 	if rec.Node != "" {
-		checkNodeHealth(rec.Node)
+		go checkNodeHealth(rec.Node)
 	}
-	checkContainer(name)
+	go checkContainer(name)
 
 	// Re-read and return updated record
 	instMu.Lock()
@@ -1710,7 +1710,7 @@ func handleNodeRebuild(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleRefreshNode triggers an immediate health check for a node and returns its record.
+// handleRefreshNode triggers an async health check and returns the current node record.
 func handleRefreshNode(w http.ResponseWriter, r *http.Request) {
 	nodeID := stripPrefix(strings.TrimSuffix(r.URL.Path, "/refresh"), "/api/nodes/")
 	if nodeID == "" {
@@ -1718,7 +1718,8 @@ func handleRefreshNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	checkNodeHealth(nodeID)
+	// Trigger health check in background — don't block the response.
+	go checkNodeHealth(nodeID)
 
 	nodesMu.Lock()
 	n, ok := nodes[nodeID]
