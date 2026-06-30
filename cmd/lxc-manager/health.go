@@ -10,11 +10,9 @@ import (
 // Container state values — set exclusively by API handlers (push).
 // These represent the authoritative lifecycle stage of the container.
 const (
-	stateRunning    = "running"
-	stateStopped    = "stopped"
-	stateCreating   = "creating"
-	stateRecovering = "recovering"
-	stateFailed     = "failed" // auto-recovery failed, needs admin intervention
+	stateRunning  = "running"
+	stateStopped  = "stopped"
+	stateCreating = "creating"
 )
 
 // Container health values — set exclusively by the health checker (pull).
@@ -93,28 +91,30 @@ func checkNodeHealth(nodeID string) {
 		return
 	}
 
-	if n.Status == "rebuilding" || n.Status == "creating" {
+	if n.State == "rebuilding" || n.State == "creating" {
 		return // don't interfere with provisioning/rebuild
 	}
 
 	cli, err := getNodeClient(nodeID)
 	if err != nil {
-		setNodeStatus(nodeID, "offline", fmt.Sprintf("connect: %v", err))
+		setNodeHealth(nodeID, "lost", fmt.Sprintf("connect: %v", err))
 		return
 	}
 
 	// Simple ping via LXD API
 	_, err = cli.ListContainers("")
 	if err != nil {
-		setNodeStatus(nodeID, "offline", fmt.Sprintf("lxd unreachable: %v", err))
+		setNodeHealth(nodeID, "lost", fmt.Sprintf("lxd unreachable: %v", err))
 		return
 	}
 
-	wasOffline := n.Status == "offline"
-	setNodeStatus(nodeID, "active", "")
+	wasLost := n.Health == "lost"
 
-	// Node just recovered from offline — restore DNAT (iptables lost after reboot)
-	if wasOffline {
+	// Node is reachable — clear health (state remains as-is)
+	setNodeHealth(nodeID, "", "")
+
+	// Node just recovered from lost — restore DNAT (iptables lost after reboot)
+	if wasLost {
 		syncDNATForNode(nodeID)
 	}
 }
@@ -143,21 +143,23 @@ func checkContainer(name string) {
 	}
 
 	// Node status determines container reachability
-	nodeStatus := getNodeStatus(rec.Node)
-	switch nodeStatus {
-	case "":
+	nodeState, nodeHealth := getNodeStateAndHealth(rec.Node)
+	switch {
+	case nodeState == "":
 		setHealth(name, healthLost, "node not found in registry")
 		return
-	case "offline":
-		setHealth(name, healthUnhealthy, "node is offline")
+	case nodeHealth == "lost":
+		setHealth(name, healthLost, "node is lost")
 		return
-	case "degraded", "creating", "rebuilding":
-		setHealth(name, healthUnhealthy, "node is "+nodeStatus)
+	case nodeState != "active":
+		setHealth(name, healthUnhealthy, "node state is "+nodeState)
+		return
+	case nodeHealth == "unhealthy":
+		setHealth(name, healthUnhealthy, "node is unhealthy")
 		return
 	}
 
-	// Node is active — do full per-container health check
-	nodeID := rec.Node
+	// Node is active and healthy — do full per-container health check
 	cli := clientForInstance(name)
 	if cli == nil {
 		setHealth(name, healthLost, "no LXD client for active node")
@@ -166,16 +168,8 @@ func checkContainer(name string) {
 
 	c, err := cli.GetContainer(name)
 	if err != nil {
-		// Container missing on active node — auto-recover
-		instMu.Lock()
-		rec, exists := instances[name]
-		instMu.Unlock()
-		if exists && rec.Node == nodeID && rec.State == stateRunning {
-			// Transition to recovering (this IS a state change, because the
-			// container no longer exists — we must recreate it).
-			setState(name, stateRecovering, "not found on node, attempting auto-recovery")
-			go recoverMissingContainer(rec)
-		}
+		// Container missing on active node — report, admin decides
+		setHealth(name, healthLost, "container not found on node")
 		return
 	}
 
@@ -206,14 +200,14 @@ func checkContainer(name string) {
 	clearHealth(name)
 }
 
-// getNodeStatus returns the status of a node without locking instMu.
-func getNodeStatus(nodeID string) string {
+// getNodeStateAndHealth returns the state and health of a node.
+func getNodeStateAndHealth(nodeID string) (string, string) {
 	nodesMu.Lock()
 	defer nodesMu.Unlock()
 	if n, ok := nodes[nodeID]; ok {
-		return n.Status
+		return n.State, n.Health
 	}
-	return ""
+	return "", ""
 }
 
 // setState updates the lifecycle state of a container and clears its health.
@@ -281,50 +275,6 @@ func clearHealth(name string) {
 		log.Printf("AUDIT: health %s cleared (healthy)", name)
 	}
 	instMu.Unlock()
-}
-
-// recoverMissingContainer recreates a container that was lost from LXD
-// but whose node is still active. Uses the instance record to rebuild.
-func recoverMissingContainer(rec *InstanceRecord) {
-	cli, err := getNodeClient(rec.Node)
-	if err != nil {
-		log.Printf("Auto-recovery %s: cannot connect to node %s: %v", rec.Name, rec.Node, err)
-		setState(rec.Name, stateFailed, fmt.Sprintf("auto-recovery failed: %v", err))
-		return
-	}
-
-	log.Printf("Auto-recovery: recreating %s on node %s (cpu=%d mem=%dMB disk=%dGB ip=%s)",
-		rec.Name, rec.Node, rec.CPU, rec.Mem, rec.Disk, rec.StaticIP)
-
-	img := env("LXC_BASE_IMAGE", "clever-vpn-base")
-	net := env("LXC_NETWORK", "vpnbr0")
-
-	cloudConfig := mergeUserData(rec.UserData, rec.Name, bootstrapEnv(rec.Name, rec.Node, rec.CPU, rec.Mem, rec.Disk,
-		PortInfo{SSH: rec.SSHExtPort, Service: rec.ServiceExtPort}), rec.Password)
-
-	if err := cli.CreateContainer(rec.Name, img, net, rec.StaticIP, rec.CPU, rec.Mem, rec.Disk,
-		map[string]string{"cloud-init.user-data": cloudConfig}); err != nil {
-		log.Printf("Auto-recovery %s: create failed: %v", rec.Name, err)
-		setState(rec.Name, stateFailed, fmt.Sprintf("auto-recovery create failed: %v", err))
-		return
-	}
-
-	if err := cli.StartContainer(rec.Name); err != nil {
-		log.Printf("Auto-recovery %s: start failed: %v", rec.Name, err)
-		setState(rec.Name, stateFailed, fmt.Sprintf("auto-recovery start failed: %v", err))
-		return
-	}
-
-	go func() {
-		if err := addPortForward(rec.Node, rec.SSHExtPort, rec.StaticIP, 22); err != nil {
-			log.Printf("Auto-recovery %s: forward ssh: %v", rec.Name, err)
-		}
-		if err := addPortForward(rec.Node, rec.ServiceExtPort, rec.StaticIP, rec.ServicePort); err != nil {
-			log.Printf("Auto-recovery %s: forward svc: %v", rec.Name, err)
-		}
-		setState(rec.Name, stateRunning, "")
-		log.Printf("Auto-recovery: %s restored successfully", rec.Name)
-	}()
 }
 
 // syncDNATForNode restores port forwarding for all containers on a node.
