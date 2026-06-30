@@ -2292,6 +2292,7 @@ func nodeToMap(n *NodeRecord) map[string]interface{} {
 		"network":       n.Network,
 		"sshHost":       n.SSHHost,
 		"sshPort":       n.SSHPort,
+		"sshPassword":   n.SSHPassword,
 		"image":         n.Image,
 		"poolSize":      n.PoolSize,
 		"state":         n.State,
