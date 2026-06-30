@@ -11,6 +11,10 @@ terraform {
       source  = "vultr/vultr"
       version = "~> 2.23"
     }
+    digitalocean = {
+      source  = "digitalocean/digitalocean"
+      version = "~> 2.40"
+    }
     cloudflare = {
       source  = "cloudflare/cloudflare"
       version = "~> 5.5"
