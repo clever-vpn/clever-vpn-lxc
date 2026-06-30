@@ -2,6 +2,10 @@ provider "vultr" {
   api_key = var.vultr_api_key
 }
 
+provider "digitalocean" {
+  token = var.do_api_token
+}
+
 provider "cloudflare" {
   api_token = var.cloudflare_api_token
 }
@@ -36,6 +40,8 @@ locals {
 
 # Vultr VPS
 resource "vultr_instance" "lxc_manager" {
+  count = var.vps_provider == "vultr" ? 1 : 0
+
   region     = var.vultr_region
   plan       = var.vultr_plan
   os_id      = var.vultr_os_id
@@ -47,11 +53,29 @@ resource "vultr_instance" "lxc_manager" {
   backups        = "disabled"
 }
 
+# Digital Ocean Droplet
+resource "digitalocean_droplet" "lxc_manager" {
+  count  = var.vps_provider == "digitalocean" ? 1 : 0
+  image  = var.do_image
+  size   = var.do_size
+  region = var.do_region
+  name   = var.vps_hostname
+  ssh_keys = var.do_ssh_key_id != "" ? [var.do_ssh_key_id] : []
+  user_data = local.cloud_init
+  ipv6    = true
+}
+
+# Unified IP references
+locals {
+  vps_ipv4 = var.vps_provider == "vultr" ? try(vultr_instance.lxc_manager[0].main_ip, "") : try(digitalocean_droplet.lxc_manager[0].ipv4_address, "")
+  vps_ipv6 = var.vps_provider == "vultr" ? try(vultr_instance.lxc_manager[0].v6_main_ip, "") : try(digitalocean_droplet.lxc_manager[0].ipv6_address, "")
+}
+
 # Cloudflare A record
 resource "cloudflare_dns_record" "api" {
   zone_id = data.cloudflare_zones.target.result[0].id
   name    = var.dns_record_name
-  content = vultr_instance.lxc_manager.main_ip
+  content = local.vps_ipv4
   type    = "A"
   ttl     = 1
   proxied = var.dns_proxied
@@ -60,9 +84,10 @@ resource "cloudflare_dns_record" "api" {
 
 # Cloudflare AAAA record (IPv6)
 resource "cloudflare_dns_record" "api_ipv6" {
+  count   = local.vps_ipv6 != "" ? 1 : 0
   zone_id = data.cloudflare_zones.target.result[0].id
   name    = var.dns_record_name
-  content = vultr_instance.lxc_manager.v6_main_ip
+  content = local.vps_ipv6
   type    = "AAAA"
   ttl     = 1
   proxied = var.dns_proxied

@@ -1,11 +1,11 @@
 output "vps_main_ip" {
   description = "VPS primary IPv4 address"
-  value       = vultr_instance.lxc_manager.main_ip
+  value       = local.vps_ipv4
 }
 
 output "vps_v6_main_ip" {
   description = "VPS primary IPv6 address"
-  value       = vultr_instance.lxc_manager.v6_main_ip
+  value       = local.vps_ipv6
 }
 
 output "fqdn" {
@@ -25,5 +25,5 @@ output "admin_login_url" {
 
 output "ssh_command" {
   description = "SSH connection command"
-  value       = "ssh root@${vultr_instance.lxc_manager.main_ip}"
+  value       = "ssh root@${local.vps_ipv4}"
 }

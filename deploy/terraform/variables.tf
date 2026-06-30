@@ -1,6 +1,7 @@
 variable "vultr_api_key" {
   type      = string
   sensitive = true
+  default   = ""
 }
 
 variable "cloudflare_api_token" {
@@ -109,4 +110,43 @@ variable "letsencrypt_staging" {
 variable "storage_pool_size" {
   type    = string
   default = "10"
+}
+
+# --- VPS Provider Selection ---
+
+variable "vps_provider" {
+  type    = string
+  default = "vultr"
+  validation {
+    condition     = contains(["vultr", "digitalocean"], var.vps_provider)
+    error_message = "Supported: vultr, digitalocean"
+  }
+}
+
+# --- Digital Ocean ---
+
+variable "do_api_token" {
+  type      = string
+  sensitive = true
+  default   = ""
+}
+
+variable "do_region" {
+  type    = string
+  default = "sgp1"
+}
+
+variable "do_size" {
+  type    = string
+  default = "s-1vcpu-1gb"
+}
+
+variable "do_image" {
+  type    = string
+  default = "ubuntu-24-04-x64"
+}
+
+variable "do_ssh_key_id" {
+  type    = string
+  default = ""
 }
