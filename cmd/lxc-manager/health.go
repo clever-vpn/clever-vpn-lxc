@@ -239,6 +239,8 @@ func setState(name, status, reason string) {
 		delete(stateFails, name)
 		stateMu.Unlock()
 	}
+
+	notifyInstanceStateChange(name, status, rec.Health, reason)
 }
 
 // setHealth updates only the health field of a container. It never touches state.
@@ -259,6 +261,8 @@ func setHealth(name, health, reason string) {
 	if prev != health {
 		log.Printf("AUDIT: health %s %s→%s (%s)", name, prev, health, reason)
 	}
+
+	notifyInstanceStateChange(name, rec.State, health, reason)
 }
 
 // clearHealth resets the health field to empty (container is healthy).
@@ -276,6 +280,8 @@ func clearHealth(name string) {
 		log.Printf("AUDIT: health %s cleared (healthy)", name)
 	}
 	instMu.Unlock()
+
+	notifyInstanceStateChange(name, rec.State, "", "healthy")
 }
 
 // syncDNATForNode restores port forwarding for all containers on a node.

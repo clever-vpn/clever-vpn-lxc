@@ -268,6 +268,8 @@ func setNodeState(nodeID, state, reason string) {
 	}
 	nodesMu.Unlock()
 	saveNodes()
+
+	notifyNodeStateChange(nodeID, state, "", reason)
 }
 
 // setNodeHealth updates only the health field of a node. Never touches state.
@@ -276,6 +278,9 @@ func setNodeHealth(nodeID, health, reason string) {
 	if n, ok := nodes[nodeID]; ok {
 		n.Health = health
 		n.StateReason = reason
+		nodesMu.Unlock()
+		notifyNodeStateChange(nodeID, n.State, health, reason)
+		return
 	}
 	nodesMu.Unlock()
 }

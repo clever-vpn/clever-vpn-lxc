@@ -2005,6 +2005,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		handlePlans(w, r)
 	case p == "/api/health" && r.Method == "GET":
 		jsonOK(w, map[string]string{"status": "ok"})
+	case p == "/api/events":
+		handleEvents(w, r)
 	// Nodes (admin auth)
 	case p == "/api/nodes" && r.Method == "POST":
 		if !validateAdmin(r) {
