@@ -50,6 +50,37 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 { "version": "v1.2.10" }
 ```
 
+### `GET /api/events` — SSE 实时事件推送
+
+通过 Server-Sent Events 推送节点和容器的状态/健康度变更。
+
+> ⚠️ EventSource 不支持自定义 HTTP 头，因此 token 通过 query 参数传递。
+
+**请求**：
+```
+GET /api/events?token=<admin-token-or-user-token>
+```
+
+**事件格式** (`event: state`)：
+```json
+{
+  "type": "instance|node",
+  "id": "容器名或节点ID",
+  "state": "running|stopped|creating|active|inactive",
+  "health": "unhealthy|lost|  (空字符串=正常)",
+  "reason": "变更原因描述"
+}
+```
+
+**前端示例**：
+```javascript
+const es = new EventSource('/api/events?token=cva_xxx');
+es.addEventListener('state', (e) => {
+  const d = JSON.parse(e.data);
+  console.log(`${d.type} ${d.id}: state=${d.state} health=${d.health} (${d.reason})`);
+});
+```
+
 ### `GET /api/regions` — 列出所有区域
 
 从 `regions.json` 数据文件读取，由管理员通过 API 管理。
