@@ -999,11 +999,8 @@ func handleNodeMigrate(w http.ResponseWriter, r *http.Request) {
 	instMu.Unlock()
 	saveInstances()
 
-	// 3. Rebuild on new machine (runs asynchronously)
-	if err := rebuildNode(nodeID); err != nil {
-		jsonError(w, fmt.Sprintf("migrate: %v", err), 500)
-		return
-	}
+	// 3. Rebuild on new machine asynchronously (SSH + setup can take up to 30s on timeout)
+	go rebuildNode(nodeID)
 
 	log.Printf("Node migration initiated: %s → %s:%d", nodeID, req.SSHHost, sshPort)
 	jsonOK(w, map[string]interface{}{
