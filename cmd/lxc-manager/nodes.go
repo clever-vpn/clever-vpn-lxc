@@ -109,6 +109,22 @@ func loadNodes() {
 		nodes[rec.ID] = &rec
 		regionNodes[rec.Region] = append(regionNodes[rec.Region], rec.ID)
 	}
+
+	// Recover nodes stuck in transient states (server restarted mid-operation).
+	recovered := 0
+	for _, rec := range nodes {
+		if rec.State == "rebuilding" || rec.State == "creating" {
+			rec.State = "active"
+			rec.StateReason = "recovered: server restarted while " + rec.State
+			rec.Health = "unhealthy"
+			recovered++
+		}
+	}
+	if recovered > 0 {
+		saveNodes()
+		log.Printf("Recovered %d node(s) stuck in transient state", recovered)
+	}
+
 	log.Printf("Loaded %d node(s)", len(nodes))
 }
 
