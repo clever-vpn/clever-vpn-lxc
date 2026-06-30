@@ -1255,6 +1255,56 @@ func handleAdminRestartContainer(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, containerResponse(instances[name]))
 }
 
+// handleAdminRebuildContainer destroys and recreates a container on the same node.
+// POST /api/admin/containers/{id}/rebuild
+func handleAdminRebuildContainer(w http.ResponseWriter, r *http.Request) {
+	name := stripPrefix(strings.TrimSuffix(r.URL.Path, "/rebuild"), "/api/admin/containers/")
+	if name == "" || strings.Contains(name, "/") {
+		jsonError(w, "name required", 400)
+		return
+	}
+
+	instMu.Lock()
+	rec, exists := instances[name]
+	instMu.Unlock()
+	if !exists {
+		jsonError(w, "container not found", 404)
+		return
+	}
+
+	nodesMu.Lock()
+	n, nodeExists := nodes[rec.Node]
+	nodesMu.Unlock()
+	if !nodeExists || n.State != "active" {
+		jsonError(w, "node is not active", 400)
+		return
+	}
+
+	// Set state to creating
+	setState(name, stateCreating, "administrator requested rebuild")
+	log.Printf("Rebuild: destroying and recreating %s on node %s", name, rec.Node)
+
+	// Destroy old container
+	cli, err := getNodeClient(rec.Node)
+	if err != nil {
+		setState(name, stateRunning, fmt.Sprintf("rebuild failed: %v", err))
+		jsonError(w, fmt.Sprintf("connect node: %v", err), 500)
+		return
+	}
+	cleanupContainerLXD(name, rec.Node, cli, rec.SSHExtPort, rec.ServiceExtPort, rec.StaticIP, rec.ServicePort)
+
+	// Recreate using same ports and IP
+	ports := PortInfo{SSH: rec.SSHExtPort, Service: rec.ServiceExtPort}
+	if err := createContainerOnNode(cli, rec.Node, rec, ports, rec.StaticIP); err != nil {
+		setState(name, stateRunning, fmt.Sprintf("rebuild failed: %v", err))
+		jsonError(w, fmt.Sprintf("rebuild: %v", err), 500)
+		return
+	}
+
+	log.Printf("Rebuild: %s rebuild complete", name)
+	jsonOK(w, containerResponse(instances[name]))
+}
+
 // handleAdminMigrateContainer moves a container to a different node.
 // POST /api/admin/containers/{id}/migrate
 func handleAdminMigrateContainer(w http.ResponseWriter, r *http.Request) {
@@ -2079,6 +2129,12 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		handleAdminMigrateContainer(w, r)
+	case strings.HasPrefix(p, "/api/admin/containers/") && strings.HasSuffix(p, "/rebuild") && r.Method == "POST":
+		if !validateAdmin(r) {
+			jsonError(w, "unauthorized", 401)
+			return
+		}
+		handleAdminRebuildContainer(w, r)
 	case strings.HasPrefix(p, "/api/admin/containers/") && strings.HasSuffix(p, "/refresh") && r.Method == "POST":
 		if !validateAdmin(r) {
 			jsonError(w, "unauthorized", 401)
