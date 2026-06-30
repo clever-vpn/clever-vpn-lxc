@@ -628,8 +628,6 @@ func sshConnect(host string, port int, password string) (*ssh.Client, error) {
 		User: "root",
 		Auth: []ssh.AuthMethod{
 			ssh.Password(password),
-			// Keyboard-interactive fallback for servers where the raw
-			// "password" SSH method is rejected by PAM (e.g. Ubuntu 22.04).
 			ssh.KeyboardInteractive(func(user, instruction string, questions []string, echos []bool) ([]string, error) {
 				answers := make([]string, len(questions))
 				for i := range answers {
@@ -638,13 +636,22 @@ func sshConnect(host string, port int, password string) (*ssh.Client, error) {
 				return answers, nil
 			}),
 		},
-		HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-			return nil
-		},
-		Timeout: 15 * time.Second,
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         15 * time.Second,
 	}
 	addr := fmt.Sprintf("%s:%d", host, port)
-	return ssh.Dial("tcp", addr, config)
+
+	// Use explicit TCP dial timeout to avoid hanging on silent packet drops.
+	conn, err := net.DialTimeout("tcp", addr, 15*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("dial: %w", err)
+	}
+	c, chans, reqs, err := ssh.NewClientConn(conn, addr, config)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return ssh.NewClient(c, chans, reqs), nil
 }
 
 func sshExec(client *ssh.Client, cmd string) (string, error) {
