@@ -323,7 +323,8 @@ func rebuildNode(nodeID string) error {
 	// SSH to the node and run the idempotent node-setup.sh
 	client, err := getSSHClient(nodeID)
 	if err != nil {
-		setNodeState(nodeID, "degraded", fmt.Sprintf("ssh: %v", err))
+		setNodeState(nodeID, "active", fmt.Sprintf("rebuild ssh: %v", err))
+		setNodeHealth(nodeID, "unhealthy", fmt.Sprintf("ssh: %v", err))
 		return fmt.Errorf("ssh connect: %w", err)
 	}
 
@@ -332,24 +333,28 @@ func rebuildNode(nodeID string) error {
 
 	// Upload and run full node-setup.sh (handles everything: LXD init, network, firewall, base image, cleanup)
 	if err := scpBytes(client, "/tmp/node-setup.sh", []byte(embeddedNodeSetup), "0755"); err != nil {
-		setNodeState(nodeID, "degraded", fmt.Sprintf("upload setup script: %v", err))
+		setNodeState(nodeID, "active", fmt.Sprintf("rebuild upload: %v", err))
+		setNodeHealth(nodeID, "unhealthy", fmt.Sprintf("upload setup script: %v", err))
 		return fmt.Errorf("upload setup script: %w", err)
 	}
 	setupCmd := fmt.Sprintf("STORAGE_POOL_SIZE=%s bash /tmp/node-setup.sh && rm -f /tmp/node-setup.sh", n.PoolSize)
 	out, err := sshExec(client, setupCmd)
 	if err != nil {
-		setNodeState(nodeID, "degraded", fmt.Sprintf("setup script: %v", err))
+		setNodeState(nodeID, "active", fmt.Sprintf("rebuild setup: %v", err))
+		setNodeHealth(nodeID, "unhealthy", fmt.Sprintf("setup script: %v", err))
 		return fmt.Errorf("setup script: %w\n%s", err, out)
 	}
 
 	// Upload and trust cert
 	clientCert := loadFile(env("LXD_CLIENT_CERT", "client.crt"))
 	if clientCert == "" {
-		setNodeState(nodeID, "degraded", "no client certificate")
+		setNodeState(nodeID, "active", "rebuild: no client certificate")
+		setNodeHealth(nodeID, "unhealthy", "no client certificate")
 		return fmt.Errorf("no client certificate found")
 	}
 	if err := scpBytes(client, "/tmp/manager-client.crt", []byte(clientCert), "0644"); err != nil {
-		setNodeState(nodeID, "degraded", fmt.Sprintf("upload cert: %v", err))
+		setNodeState(nodeID, "active", fmt.Sprintf("rebuild cert: %v", err))
+		setNodeHealth(nodeID, "unhealthy", fmt.Sprintf("upload cert: %v", err))
 		return fmt.Errorf("upload cert: %w", err)
 	}
 	sshExec(client, "lxc config set core.https_address :8443 2>/dev/null || true")
