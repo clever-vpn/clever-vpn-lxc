@@ -519,58 +519,6 @@ func adminTokenFromRequest(r *http.Request) string {
 
 // ==================== Startup recovery ====================
 
-func recoverInstances() {
-	log.Printf("Recovering %d instance(s)...", len(instances))
-
-	for name, rec := range instances {
-		if rec.Node == "" {
-			log.Printf("  %s: no node assigned, skipping", name)
-			continue
-		}
-		cli, err := getNodeClient(rec.Node)
-		if err != nil {
-			log.Printf("  %s: node %s unreachable: %v", name, rec.Node, err)
-			continue
-		}
-
-		c, err := cli.GetContainer(name)
-		if err != nil {
-			log.Printf("  %s: not found in LXD, skipping", name)
-			continue
-		}
-
-		if strings.EqualFold(c.Status, "Stopped") {
-			log.Printf("  %s: starting...", name)
-			if err := cli.StartContainer(name); err != nil {
-				log.Printf("  %s: start failed: %v", name, err)
-				continue
-			}
-		}
-
-		// Use static IP if available, otherwise poll
-		vip := rec.StaticIP
-		if vip == "" {
-			var err error
-			vip, err = cli.InstanceIPv4(name, 30*time.Second)
-			if err != nil {
-				log.Printf("  %s: no IP: %v", name, err)
-				continue
-			}
-		}
-
-		if err := addPortForward(rec.Node, rec.SSHExtPort, vip, 22); err != nil {
-			log.Printf("  %s: forward ssh %d: %v", name, rec.SSHExtPort, err)
-			continue
-		}
-		if err := addPortForward(rec.Node, rec.ServiceExtPort, vip, rec.ServicePort); err != nil {
-			log.Printf("  %s: forward svc %d: %v", name, rec.ServiceExtPort, err)
-			continue
-		}
-		log.Printf("  %s: recovered ssh=%d svc=%d -> %s", name, rec.SSHExtPort, rec.ServiceExtPort, vip)
-	}
-	log.Printf("Recovery complete")
-}
-
 // ==================== Container Handlers ====================
 
 // createContainerOnNode is the single entry point for creating a container on a
@@ -711,7 +659,7 @@ func createContainerCore(userID string, userData string, cpu, mem, disk, service
 
 	if err := createContainerOnNode(cli, nodeID, rec, ports, rec.StaticIP); err != nil {
 		unregisterInstance(name)
-		setNodeStatus(nodeID, "degraded", err.Error())
+		setNodeHealth(nodeID, "unhealthy", err.Error())
 		return nil, PortInfo{}, err
 	}
 	log.Printf("Ports: ssh=%d, svc=%d -> %s", ports.SSH, ports.Service, rec.StaticIP)
@@ -1343,8 +1291,8 @@ func handleAdminMigrateContainer(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "target node not found", 404)
 		return
 	}
-	if destNode.Status != "active" {
-		jsonError(w, fmt.Sprintf("target node is %s", destNode.Status), 400)
+	if destNode.State != "active" {
+		jsonError(w, fmt.Sprintf("target node is %s", destNode.State), 400)
 		return
 	}
 
@@ -1542,7 +1490,7 @@ func handleNodeAdd(w http.ResponseWriter, r *http.Request) {
 		SSHPort:       int(req.SSHPort),
 		SSHPassword:   req.SSHPassword,
 		PoolSize:      ps,
-		Status:        "creating",
+		State:         "creating",
 		MaxContainers: int(req.MaxContainers),
 	}
 
@@ -1557,14 +1505,15 @@ func handleNodeAdd(w http.ResponseWriter, r *http.Request) {
 		nodesMu.Lock()
 		if n, ok := nodes[rec.ID]; ok {
 			if err != nil {
-				n.Status = "degraded"
-				n.StatusReason = fmt.Sprintf("provision: %v", err)
+				n.State = "active"
+				n.Health = "unhealthy"
+				n.StateReason = fmt.Sprintf("provision: %v", err)
 				log.Printf("Node %s provision failed: %v", rec.ID, err)
 			} else {
 				n.URL = provisioned.URL
 				n.Network = provisioned.Network
 				n.Image = provisioned.Image
-				n.Status = "active"
+				n.State = "active"
 				log.Printf("Node %s ready: %s (region=%s)", rec.ID, n.URL, rec.Region)
 			}
 		}
@@ -1701,13 +1650,13 @@ func handleNodeRebuild(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]interface{}{
 		"nodeID":        n.ID,
 		"name":          n.Name,
-		"status":        n.Status,
+		"state":         n.State,
 		"region":        n.Region,
 		"sshHost":       n.SSHHost,
 		"sshPort":       n.SSHPort,
 		"poolSize":      n.PoolSize,
 		"maxContainers": n.MaxContainers,
-		"statusReason":  n.StatusReason,
+		"stateReason":   n.StateReason,
 	})
 }
 
@@ -2187,8 +2136,6 @@ func cmdServe() {
 	_, err = getDefaultClient()
 	if err != nil {
 		log.Printf("WARNING: no nodes available: %v (add a node first)", err)
-	} else {
-		recoverInstances()
 	}
 
 	domain := cfg.Domain
@@ -2286,8 +2233,9 @@ func nodeToMap(n *NodeRecord) map[string]interface{} {
 		"sshPort":       n.SSHPort,
 		"image":         n.Image,
 		"poolSize":      n.PoolSize,
-		"status":        n.Status,
-		"statusReason":  n.StatusReason,
+		"state":         n.State,
+		"stateReason":   n.StateReason,
+		"health":        n.Health,
 		"maxContainers": n.MaxContainers,
 		"ipv4":          n.IPv4,
 		"ipv6":          n.IPv6,

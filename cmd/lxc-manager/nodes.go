@@ -30,10 +30,11 @@ type NodeRecord struct {
 	SSHPort       int    `json:"sshPort"`
 	SSHPassword   string `json:"sshPassword"`
 	Image         string `json:"image"`
-	PoolSize      string `json:"poolSize"` // btrfs pool size (e.g. "10", "15GiB")
-	Status        string `json:"status"`   // "active" | "degraded" | "offline" | "rebuilding"
-	StatusReason  string `json:"statusReason,omitempty"`
-	MaxContainers int    `json:"maxContainers"` // 0 = unlimited
+	PoolSize      string `json:"poolSize"`        // btrfs pool size (e.g. "10", "15GiB")
+	State         string `json:"state"`            // "active" | "creating" | "rebuilding" (lifecycle, set by API handlers)
+	StateReason   string `json:"stateReason,omitempty"`
+	Health        string `json:"health,omitempty"` // "" | "unhealthy" | "lost" (runtime, set by health checker)
+	MaxContainers int    `json:"maxContainers"`    // 0 = unlimited
 	IPv4          string `json:"ipv4,omitempty"`
 	IPv6          string `json:"ipv6,omitempty"`
 }
@@ -71,16 +72,41 @@ func loadNodes() {
 		log.Fatalf("read nodes: %v", err)
 	}
 
-	var wrapper struct {
-		Version int          `json:"version"`
-		Records []NodeRecord `json:"records"`
+	// Unmarshal into raw structure first for backward compat migration.
+	var rawWrapper struct {
+		Version int                      `json:"version"`
+		Records []map[string]interface{} `json:"records"`
 	}
-	if err := json.Unmarshal(data, &wrapper); err != nil {
+	if err := json.Unmarshal(data, &rawWrapper); err != nil {
 		log.Fatalf("parse nodes: %v", err)
 	}
-	for i := range wrapper.Records {
-		rec := &wrapper.Records[i]
-		nodes[rec.ID] = rec
+
+	for _, raw := range rawWrapper.Records {
+		// Migrate old field names: status→state, statusReason→stateReason
+		if _, ok := raw["state"]; !ok {
+			if s, ok := raw["status"].(string); ok {
+				raw["state"] = s
+			}
+		}
+		if _, ok := raw["stateReason"]; !ok {
+			if r, ok := raw["statusReason"].(string); ok {
+				raw["stateReason"] = r
+			}
+		}
+		delete(raw, "status")
+		delete(raw, "statusReason")
+
+		// Re-marshal and unmarshal into NodeRecord
+		recBytes, _ := json.Marshal(raw)
+		var rec NodeRecord
+		if err := json.Unmarshal(recBytes, &rec); err != nil {
+			log.Printf("WARNING: skip malformed node record: %v", err)
+			continue
+		}
+		if rec.State == "" {
+			rec.State = "active" // default
+		}
+		nodes[rec.ID] = &rec
 		regionNodes[rec.Region] = append(regionNodes[rec.Region], rec.ID)
 	}
 	log.Printf("Loaded %d node(s)", len(nodes))
@@ -188,7 +214,7 @@ func pickNode(region string) (string, *lxc.Client, error) {
 	bestCount := -1
 	for _, id := range ids {
 		n := nodes[id]
-		if n == nil || n.Status != "active" {
+		if n == nil || n.State != "active" {
 			continue // skip inactive nodes
 		}
 		if n.MaxContainers > 0 && nodeCounts[id] >= n.MaxContainers {
@@ -232,15 +258,26 @@ func resolveNodeByNameOrID(input string) string {
 	return ""
 }
 
-// setNodeStatus updates a node's status and reason, then persists.
-func setNodeStatus(nodeID, status, reason string) {
+// setNodeState updates a node's lifecycle state and reason, then persists.
+func setNodeState(nodeID, state, reason string) {
 	nodesMu.Lock()
 	if n, ok := nodes[nodeID]; ok {
-		n.Status = status
-		n.StatusReason = reason
+		n.State = state
+		n.StateReason = reason
+		n.Health = "" // state change resets health observation
 	}
 	nodesMu.Unlock()
 	saveNodes()
+}
+
+// setNodeHealth updates only the health field of a node. Never touches state.
+func setNodeHealth(nodeID, health, reason string) {
+	nodesMu.Lock()
+	if n, ok := nodes[nodeID]; ok {
+		n.Health = health
+		n.StateReason = reason
+	}
+	nodesMu.Unlock()
 }
 
 // updateNodeConfig updates the mutable fields of a node (status, maxContainers).
@@ -277,16 +314,16 @@ func rebuildNode(nodeID string) error {
 		return fmt.Errorf("node %s not found", nodeID)
 	}
 
-	if n.Status == "rebuilding" || n.Status == "creating" {
-		return fmt.Errorf("node %s is already %s", nodeID, n.Status)
+	if n.State == "rebuilding" || n.State == "creating" {
+		return fmt.Errorf("node %s is already %s", nodeID, n.State)
 	}
 
-	setNodeStatus(nodeID, "rebuilding", "administrator requested rebuild")
+	setNodeState(nodeID, "rebuilding", "administrator requested rebuild")
 
 	// SSH to the node and run the idempotent node-setup.sh
 	client, err := getSSHClient(nodeID)
 	if err != nil {
-		setNodeStatus(nodeID, "degraded", fmt.Sprintf("ssh: %v", err))
+		setNodeState(nodeID, "degraded", fmt.Sprintf("ssh: %v", err))
 		return fmt.Errorf("ssh connect: %w", err)
 	}
 
@@ -295,24 +332,24 @@ func rebuildNode(nodeID string) error {
 
 	// Upload and run full node-setup.sh (handles everything: LXD init, network, firewall, base image, cleanup)
 	if err := scpBytes(client, "/tmp/node-setup.sh", []byte(embeddedNodeSetup), "0755"); err != nil {
-		setNodeStatus(nodeID, "degraded", fmt.Sprintf("upload setup script: %v", err))
+		setNodeState(nodeID, "degraded", fmt.Sprintf("upload setup script: %v", err))
 		return fmt.Errorf("upload setup script: %w", err)
 	}
 	setupCmd := fmt.Sprintf("STORAGE_POOL_SIZE=%s bash /tmp/node-setup.sh && rm -f /tmp/node-setup.sh", n.PoolSize)
 	out, err := sshExec(client, setupCmd)
 	if err != nil {
-		setNodeStatus(nodeID, "degraded", fmt.Sprintf("setup script: %v", err))
+		setNodeState(nodeID, "degraded", fmt.Sprintf("setup script: %v", err))
 		return fmt.Errorf("setup script: %w\n%s", err, out)
 	}
 
 	// Upload and trust cert
 	clientCert := loadFile(env("LXD_CLIENT_CERT", "client.crt"))
 	if clientCert == "" {
-		setNodeStatus(nodeID, "degraded", "no client certificate")
+		setNodeState(nodeID, "degraded", "no client certificate")
 		return fmt.Errorf("no client certificate found")
 	}
 	if err := scpBytes(client, "/tmp/manager-client.crt", []byte(clientCert), "0644"); err != nil {
-		setNodeStatus(nodeID, "degraded", fmt.Sprintf("upload cert: %v", err))
+		setNodeState(nodeID, "degraded", fmt.Sprintf("upload cert: %v", err))
 		return fmt.Errorf("upload cert: %w", err)
 	}
 	sshExec(client, "lxc config set core.https_address :8443 2>/dev/null || true")
@@ -376,16 +413,17 @@ func rebuildNode(nodeID string) error {
 		nodesMu.Lock()
 		if n, ok := nodes[nodeID]; ok {
 			if allHealthy {
-				n.Status = "active"
-				n.StatusReason = ""
+				n.State = "active"
+				n.StateReason = ""
 			} else {
-				n.Status = "degraded"
-				n.StatusReason = "some containers failed to recover"
+				n.State = "active"
+				n.Health = "unhealthy"
+				n.StateReason = "some containers failed to recover"
 			}
 		}
 		nodesMu.Unlock()
 		saveNodes()
-		log.Printf("Node %s rebuild complete (status=%s)", nodeID, nodes[nodeID].Status)
+		log.Printf("Node %s rebuild complete (state=%s)", nodeID, nodes[nodeID].State)
 	}()
 
 	log.Printf("Node %s rebuild initiated, status=rebuilding", n.Name)
@@ -722,7 +760,7 @@ func provisionNode(name, region, host string, port int, password string, poolSiz
 		Image:       img,
 		IPv4:        ipv4,
 		PoolSize:    poolSize,
-		Status:      "active",
+		State:      "active",
 		IPv6:        ipv6,
 	}
 	return rec, nil
