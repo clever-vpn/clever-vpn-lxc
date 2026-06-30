@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -116,4 +117,17 @@ func listRegionsSlice() []RegionInfo {
 		})
 	}
 	return result
+}
+
+// listPublicRegions returns regions visible to non-admin users.
+// Test regions (id prefixed with "test-") are excluded.
+func listPublicRegions() []RegionInfo {
+	all := listRegionsSlice()
+	filtered := make([]RegionInfo, 0, len(all))
+	for _, r := range all {
+		if !strings.HasPrefix(r.ID, "test-") {
+			filtered = append(filtered, r)
+		}
+	}
+	return filtered
 }

@@ -1824,7 +1824,12 @@ func handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 
 func handleRegions(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "GET" {
-		jsonOK(w, listRegionsSlice())
+		// Admin sees all regions including test-*; public users see filtered list.
+		if validateAdmin(r) {
+			jsonOK(w, listRegionsSlice())
+		} else {
+			jsonOK(w, listPublicRegions())
+		}
 		return
 	}
 
