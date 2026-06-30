@@ -53,14 +53,20 @@ func broadcastSSE(evt sseEvent) {
 }
 
 // handleEvents serves the SSE stream for admin clients.
-// GET /api/events?token=<admin-token>
+// GET /api/events?token=<admin-or-user-token>
 func handleEvents(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
 		jsonError(w, "method not allowed", 405)
 		return
 	}
-	ok, _ := validateUser(r)
-	if !validateAdmin(r) && !ok {
+
+	// EventSource doesn't support custom headers, so accept token via query param.
+	// Falls back to Authorization header for curl/API clients.
+	token := r.URL.Query().Get("token")
+	if token == "" {
+		token = getBearerToken(r)
+	}
+	if token == "" || (!validateAdminToken(token) && !validateUserToken(token)) {
 		jsonError(w, "unauthorized", 401)
 		return
 	}
