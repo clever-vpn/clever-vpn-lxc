@@ -1676,6 +1676,7 @@ func handleNodeUpdate(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleNodeRebuild rebuilds a node: reinitializes LXD and recovers all containers.
+// Runs asynchronously: returns immediately, actual rebuild happens in background.
 func handleNodeRebuild(w http.ResponseWriter, r *http.Request) {
 	nodeID := stripPrefix(strings.TrimSuffix(r.URL.Path, "/rebuild"), "/api/nodes/")
 	if nodeID == "" {
@@ -1683,12 +1684,7 @@ func handleNodeRebuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := rebuildNode(nodeID); err != nil {
-		jsonError(w, err.Error(), 500)
-		return
-	}
-
-	// Return full node record after triggering rebuild
+	// Validate node exists and is not already in a transient state
 	nodesMu.Lock()
 	n, ok := nodes[nodeID]
 	nodesMu.Unlock()
@@ -1696,17 +1692,24 @@ func handleNodeRebuild(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "node not found", 404)
 		return
 	}
+	if n.State == "rebuilding" || n.State == "creating" {
+		jsonError(w, fmt.Sprintf("node is already %s", n.State), 400)
+		return
+	}
+
+	// Trigger rebuild in background (SSH + setup can take up to 30s on timeout)
+	go rebuildNode(nodeID)
 
 	jsonOK(w, map[string]interface{}{
-		"nodeID":        n.ID,
-		"name":          n.Name,
-		"state":         n.State,
-		"region":        n.Region,
-		"sshHost":       n.SSHHost,
-		"sshPort":       n.SSHPort,
-		"poolSize":      n.PoolSize,
+		"nodeID":      nodeID,
+		"name":        n.Name,
+		"state":       "rebuilding",
+		"region":      n.Region,
+		"sshHost":     n.SSHHost,
+		"sshPort":     n.SSHPort,
+		"poolSize":    n.PoolSize,
 		"maxContainers": n.MaxContainers,
-		"stateReason":   n.StateReason,
+		"stateReason": "administrator requested rebuild",
 	})
 }
 
