@@ -1523,7 +1523,7 @@ func handleNodeAdd(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Node %s registered, provisioning in background", rec.ID)
 	jsonOK(w, map[string]interface{}{
-		"status": "creating",
+		"state":  "creating",
 		"id":     rec.ID,
 		"name":   rec.Name,
 		"region": rec.Region,
