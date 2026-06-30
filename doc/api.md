@@ -54,6 +54,9 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 
 从 `regions.json` 数据文件读取，由管理员通过 API 管理。
 
+> **过滤规则**：ID 以 `test-` 开头的区域仅管理员可见（通过 `Authorization: Bearer <admin-token>` 认证后获取），
+> 未经认证的公开请求自动过滤掉测试区域，不影响普通用户使用。
+
 **响应** `200`：
 ```json
 [
@@ -312,7 +315,7 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 #### `POST /api/nodes` — 添加节点
 
 异步接口：立即返回后，后台通过 SSH 初始化 LXD。
-前端轮询 `GET /api/nodes` 查看状态变化：`creating` → `active` 或 `degraded`。
+前端轮询 `GET /api/nodes` 查看状态变化：`creating` → `active`（成功）或 `active` + `health=unhealthy`（失败）。
 
 **请求头**：`Authorization: Bearer <admin-token>`
 ```json
@@ -340,7 +343,7 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 **响应** `200`：
 ```json
 {
-  "status": "creating",
+  "state": "creating",
   "id": "nd_abc123",
   "name": "vultr-nrt",
   "region": "nrt"
@@ -365,8 +368,9 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
     "sshPassword": "password",
     "image": "clever-vpn-base",
     "poolSize": "10",
-    "status": "active",
-    "statusReason": "",
+    "state": "active",
+    "stateReason": "",
+    "health": "",
     "maxContainers": 5,
     "containerCount": 3,
     "ipv4": "192.168.1.10",
@@ -386,9 +390,10 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 | `sshPort` | int | SSH 端口 |
 | `image` | string | 基础镜像别名 |
 | `poolSize` | string | btrfs 存储池大小 |
-| `status` | string | `creating` / `active` / `rebuilding` / `degraded` / `offline` |
-| `statusReason` | string | 状态原因（非正常状态时） |
-| `maxContainers` | int | 最大容器数限制，0 = drain（不接受新容器），不传 = 不限制 |
+| `state` | string | `active` / `creating` / `rebuilding`（生命周期，由 API 操作设定） |
+| `stateReason` | string | 状态原因（非正常状态时） |
+| `health` | string | `""` / `unhealthy` / `lost`（运行时质量，由健康检测设定） |
+| `maxContainers` | int | 最大容器数限制，`0` = drain（不接受新容器），不传 = 不限制 |
 | `containerCount` | int | 当前节点上的容器数（计算字段） |
 | `ipv4` | string | 自动检测的公网 IPv4（provision/rebuild 时检测） |
 | `ipv6` | string | 自动检测的公网 IPv6（provision/rebuild 时检测） |
@@ -397,7 +402,7 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 
 **用途**：修改已有节点的连接参数和容量设置。**不会**移动或重建容器。
 不可修改 `name`、`region`、`sshHost`（关联业务逻辑）。
-`status` 由系统自动管理，不可手动设置。
+`state` 和 `health` 由系统自动管理，不可手动设置。
 
 **请求头**：`Authorization: Bearer <admin-token>`
 
@@ -420,7 +425,7 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 
 **响应** `200`：
 ```json
-{ "nodeID": "nd_abc123", "status": "updated" }
+{ "nodeID": "nd_abc123", "state": "updated" }
 ```
 
 #### `POST /api/nodes/{id}/migrate` — 迁移节点到新机器
@@ -454,7 +459,7 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 **响应** `200`（重建在后台异步执行）：
 ```json
 {
-  "status": "rebuilding",
+  "state": "rebuilding",
   "nodeID": "nd_abc123",
   "name": "tokyo-1",
   "region": "jp-tokyo"
@@ -470,7 +475,7 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
    a. SSH 到新机器执行 node-setup.sh（安装 LXD、初始化网络、信任证书）
    b. 从 instances.json 读取每个容器，在新机器上重建
    c. 配置 DNAT 端口转发
-   d. 节点状态：rebuilding → active（全部成功）或 degraded（部分失败）
+   d. 节点状态：rebuilding → active（全部成功）或 active + health=unhealthy（部分失败）
 ```
 
 **迁移后容器变化**：
@@ -489,22 +494,22 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 #### `POST /api/nodes/{id}/rebuild` — 重建节点
 
 清空节点上所有容器和 DNAT 规则，重新初始化 LXD，然后从 `instances.json` 全量恢复容器。
-节点状态变化：`rebuilding` → `active`（全部成功）或 `degraded`（部分失败）。
+节点状态变化：`rebuilding` → `active`（全部成功）或 `active` + `health=unhealthy`（部分失败）。
 
 **请求头**：`Authorization: Bearer <admin-token>`
 
-**响应** `200`：返回完整的节点记录，`status` 为 `"rebuilding"`：
+**响应** `200`：返回完整的节点记录，`state` 为 `"rebuilding"`：
 ```json
 {
   "nodeID": "nd_abc123",
   "name": "node-local",
-  "status": "rebuilding",
+  "state": "rebuilding",
   "region": "nrt",
   "sshHost": "1.2.3.4",
   "sshPort": 2222,
   "poolSize": "15",
   "maxContainers": 10,
-  "statusReason": "administrator requested rebuild"
+  "stateReason": "administrator requested rebuild"
 }
 ```
 
@@ -519,13 +524,13 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 {
   "nodeID": "nd_abc123",
   "name": "node-local",
-  "status": "active",
+  "state": "active",
   "region": "nrt",
   "sshHost": "1.2.3.4",
   "sshPort": 2222,
   "poolSize": "15",
   "maxContainers": 10,
-  "statusReason": ""
+  "stateReason": ""
 }
 ```
 
@@ -574,7 +579,7 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 
 **错误**：
 - `400`：`container is already on this node` — 目标节点与当前节点相同
-- `400`：`target node is degraded` — 目标节点不可用
+- `400`：`target node is not active` — 目标节点不可用
 - `404`：容器或目标节点不存在
 
 **迁移流程**：
@@ -710,11 +715,10 @@ Base URL: `https://<host>:<port>` (default port: `443` with certmagic DNS-01)
 
 | 值 | 含义 | 触发者 |
 |------|------|--------|
-| `running` | 容器在运行 | 用户 start / 创建完成 / 恢复完成 |
+| `running` | 容器在运行 | 用户 start / 创建完成 |
 | `stopped` | 容器已停止 | 用户 stop |
 | `creating` | 正在创建中 | 系统创建流程 |
-| `recovering` | 自动恢复中 | 健康检测发现容器丢失 |
-| `failed` | 恢复失败，需管理员介入 | 自动恢复失败 |
+| `migrating` | 正在迁移中 | 管理员迁移操作 |
 
 > **可信性保证**：start/stop 命令在 LXD 操作成功后才更新 `state`。API 消费者无需怀疑 `state` 的准确性。
 
@@ -740,8 +744,7 @@ running       "unhealthy"   ⚠️ 运行中但异常
 running       "lost"        🔴 节点失联
 stopped       ""            ⏸️ 用户主动停止
 creating      ""            🔄 创建中
-recovering    ""            🔄 自动恢复中
-failed        ""            ❌ 恢复失败
+migrating     ""            🔄 迁移中
 ```
 
 **关键规则**：
@@ -749,6 +752,7 @@ failed        ""            ❌ 恢复失败
 - `health` 由健康检测设定，API handler（start/stop）**清空** `health`
 - `state` 变更时自动清空 `health`（重新开始观测）
 - 前端展示优先看 `state`，`state=running` 时再看 `health`
+- 异常容器由管理员根据 `state` + `health` 组合决定是否重建
 
 ### 检测机制
 
