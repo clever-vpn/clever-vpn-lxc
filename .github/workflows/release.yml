@@ -64,7 +64,7 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           GOOS=linux GOARCH=amd64 go build \
-            -ldflags "-X main.version=${VERSION}" \
+            -ldflags "-s -w -X main.version=${VERSION}" \
             -o lxc-manager-amd64-${VERSION} ./cmd/lxc-manager
           gzip -c lxc-manager-amd64-${VERSION} > lxc-manager-amd64-${VERSION}.gz
           sha256sum lxc-manager-amd64-${VERSION} | awk '{print $1}' > lxc-manager-amd64-${VERSION}.sha256
@@ -74,7 +74,7 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           GOOS=linux GOARCH=arm64 go build \
-            -ldflags "-X main.version=${VERSION}" \
+            -ldflags "-s -w -X main.version=${VERSION}" \
             -o lxc-manager-arm64-${VERSION} ./cmd/lxc-manager
           gzip -c lxc-manager-arm64-${VERSION} > lxc-manager-arm64-${VERSION}.gz
           sha256sum lxc-manager-arm64-${VERSION} | awk '{print $1}' > lxc-manager-arm64-${VERSION}.sha256
