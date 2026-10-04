@@ -722,6 +722,30 @@ es.addEventListener('state', (e) => {
 
 **响应** `200`：返回完整的容器记录（格式同上）。
 
+#### `POST /api/admin/containers/{id}/rebuild` — 容器**原地重建**
+
+**用途**：把容器**删了重来**（同一个节点、同一个名字）—— 用于容器被弄坏、
+或上一次创建失败（`state=failed`）需要重来。
+
+**请求头**：`Authorization: Bearer <admin-token>`
+
+**请求体**：无（`{}` 即可）。
+
+**响应** `200`：返回容器记录，此刻 `state` 为 `"rebuilding"`。
+
+⚠️ **保留什么 / 丢掉什么**（Cloudflare 实现，ADR-18）：
+
+| 东西 | 行为 |
+| --- | --- |
+| 容器名、归属用户、规格、`label`、`userData` 文本 | **保留** |
+| root 密码 | **保留** |
+| 外部端口 / 容器内静态 IP | 🔴 **重新分配**（“容器级一律重分配”） |
+| `userData`（cloud-init） | ✅ **重新执行一遍** |
+| **容器里的数据** | ❌ **全丢**（它是删了重来，**不是重启**） |
+| `state` | `rebuilding` → 完成回 `running`（失败则 `failed` + `stateReason`） |
+
+> 系统**不提供 retry 端点**：重建/迁移就是“重试”的全部手段（ADR-18 决策七）。
+
 ---
 
 ## Web 终端
@@ -750,6 +774,14 @@ es.addEventListener('state', (e) => {
 | `stopped` | 容器已停止 | 用户 stop |
 | `creating` | 正在创建中 | 系统创建流程 |
 | `migrating` | 正在迁移中 | 管理员迁移操作 |
+| `rebuilding` | 正在**重建**中（删了重来） | 管理员重建（**Cloudflare 实现新增**，见下） |
+
+> ⚠️ **Cloudflare 实现（`clever-vpn-cf-lxc`）的差异**（ADR-18，2026-10-04）：
+> 容器**重建 / 迁移**期间一律用 `rebuilding`（**新增值**，与节点级的 `rebuilding` 统一），
+> **不再使用** `migrating` —— 那儿的“迁移”是一次**记录变更**（瞬间完成），
+> 之后在新节点上把实例建出来就是一次普通的 `creating`。
+> 消费者只要做 `state === "running"` 的二值判断（下游 `cf-api` 正是如此），
+> 任何非 `running` 都表示“当前不可用”，因此多一个非 running 值对它们是无害的。
 
 > **可信性保证**：start/stop 命令在 LXD 操作成功后才更新 `state`。API 消费者无需怀疑 `state` 的准确性。
 
