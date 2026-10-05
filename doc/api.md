@@ -67,6 +67,7 @@ GET /api/events?token=<admin-token-or-user-token>
   "type": "instance|node",
   "id": "容器名或节点ID",
   "state": "running|stopped|creating|active|inactive",
+  // ⚠️ `health` 只有 type=node 才有：容器没有 health（2026-10-05 删除）
   "health": "unhealthy|lost|  (空字符串=正常)",
   "reason": "变更原因描述"
 }
@@ -257,7 +258,6 @@ es.addEventListener('state', (e) => {
   "publicIPv6": "2001:db8::1",
   "created": "2026-06-24T09:00:00Z",
   "state": "running",
-  "health": "",
   "terminalUrl": "https://lxc-api.clever-clouds.com/terminal/user-a1b2c3d4",
   "planID": "lxc-1c-512mb",
   "label": "",
@@ -265,7 +265,12 @@ es.addEventListener('state', (e) => {
 }
 ```
 
-> 容器创建后 `state` 为 `"running"`（创建成功即已启动），`health` 为空字符串（将由后台健康检测填充）。
+> 🔴 **2026-10-05 契约修订：容器响应里的 `health` 字段已删除**（控制面第二实现
+> `clever-vpn-cf-lxc` 同批改）。理由：它没有独立信息 —— “够不着”要么是**节点**的
+> `health`（机器不可达）、要么是容器的 `state = failed`（容器不在节点上）；而原实现
+> 那个 `unhealthy`（在跑但 exec 连续失败）**从未真正实现过**；“孤儿”（库里有、
+> 机器上没有）属于**节点对账**的产物，也不是容器状态。
+> **节点的 `health` 保留**（不可达只能由它表达）。
 
 ### `GET /api/containers` — 列出我的容器
 
@@ -299,7 +304,6 @@ es.addEventListener('state', (e) => {
   "publicIPv6": "2001:db8::1",
   "created": "2026-06-24T09:00:00Z",
   "state": "running",
-  "health": "",
   "terminalUrl": "https://lxc-api.clever-clouds.com/terminal/user-a1b2c3d4",
   "planID": "lxc-1c-512mb",
   "label": "",
@@ -309,7 +313,7 @@ es.addEventListener('state', (e) => {
 
 ### `POST /api/containers/{id}/start` — 启动容器
 
-操作成功后立即将容器 `state` 设为 `"running"`，`health` 清空（等待下次健康检测）。
+操作成功后立即将容器 `state` 设为 `"running"`。
 
 **请求头**：`Authorization: Bearer <user-token>`
 
@@ -317,7 +321,7 @@ es.addEventListener('state', (e) => {
 
 ### `POST /api/containers/{id}/stop` — 停止容器
 
-操作成功后立即将容器 `state` 设为 `"stopped"`，`health` 清空。
+操作成功后立即将容器 `state` 设为 `"stopped"`。
 
 **请求头**：`Authorization: Bearer <user-token>`
 
@@ -786,6 +790,16 @@ es.addEventListener('state', (e) => {
 > **可信性保证**：start/stop 命令在 LXD 操作成功后才更新 `state`。API 消费者无需怀疑 `state` 的准确性。
 
 ### `health` — 运行时健康状态
+
+> 🔴 **2026-10-05 修订：容器没有这一维了**（指契约的未来走向，由控制面第二实现
+> `clever-vpn-cf-lxc` 落地；**下文那套语义是 Go 参考实现的旧口径**）。
+>
+> 理由：它没有独立信息 —— “够不着”要么是**节点**的 `health`（机器不可达）、要么是
+> 容器的 `state = failed`（容器不在节点上）；而下面的 `unhealthy` 依赖**进程内的
+> 连续失败计数**（无状态运行时里活不下来）⇒ 我们那边**从未实现**它（`probe_failures`
+> 全仓没有一处 `+1`）；“孤儿”（库里有、机器上没有）是**节点对账**的产物，也不是容器状态。
+> ⇒ 两个实现在这一维上**有意不同**（已核实 `cf-api` 对容器 `health` 0 处引用）。
+> **节点的 `health` 保留** —— 机器不可达只能由它表达。
 
 **写入者**：后台健康检查器（每 60 秒）和 `GET /api/containers/{id}` 的实时查询。
 
