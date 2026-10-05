@@ -272,6 +272,21 @@ es.addEventListener('state', (e) => {
 > 机器上没有）属于**节点对账**的产物，也不是容器状态。
 > **节点的 `health` 保留**（不可达只能由它表达）。
 
+> 🔴 **2026-10-05 第二批（节点侧）：节点的 `health` 也退场了**（控制面第二实现
+> `clever-vpn-cf-lxc` 同期改，该仓库 PR #56）。三个状态维度（`state` / agent 通道 /
+> `health`）收成**一个** `status`：
+>
+> | `status` | 含义 |
+> | --- | --- |
+> | `aligning` | 重建中（正在被删光重灌） |
+> | `offline` | 够不着（agent 未连上 / 已断开，**含从未连过**） |
+> | `lxd_unavailable` | 通道通、但 LXD 不可用 —— 即本实现里**定义了却从未产生过**的 `unhealthy` |
+> | `ready` | 正常 |
+>
+> `state`（供给阶段）仍在；另新增 `observedAt`（“新鲜度”的唯一表达）。
+> ⇒ 两个实现在**节点响应的字段形状**上有意不同；完整定义与理由见该仓库
+> `doc/decisions.md` 的 ADR-10「节点状态收成一列」修订。
+
 ### `GET /api/containers` — 列出我的容器
 
 只返回当前用户创建的容器。支持 `?label=` 按标签筛选。
@@ -427,7 +442,9 @@ es.addEventListener('state', (e) => {
 | `poolSize` | string | btrfs 存储池大小 |
 | `state` | string | `active` / `creating` / `rebuilding`（生命周期，由 API 操作设定） |
 | `stateReason` | string | 状态原因（非正常状态时） |
-| `health` | string | `""` / `unhealthy` / `lost`（运行时质量，由健康检测设定） |
+| `health` | string | `""` / `unhealthy` / `lost`（运行时质量，由健康检测设定）<br>⚠️ **第二实现（cf-lxc）已改用下面的 `status`** —— 见上方 2026-10-05 第二批修订 |
+| `status` | string | ⚠️ **第二实现新增（本实现没有）**：`aligning` / `offline` / `lxd_unavailable` / `ready` —— 节点**唯一**的对外状态 |
+| `observedAt` | int | ⚠️ **第二实现新增**：最近一次 LXD 观测的时刻（epoch ms）；`null` = 从未观测过 |
 | `maxContainers` | int | 最大容器数限制，`0` = drain（不接受新容器），不传 = 不限制 |
 | `containerCount` | int | 当前节点上的容器数（计算字段） |
 | `ipv4` | string | 自动检测的公网 IPv4（provision/rebuild 时检测） |
